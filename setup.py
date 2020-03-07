@@ -9,6 +9,7 @@ setup(name='dot-conf',
       author_email='benzhangniu@gmail.com',
       url='https://www.python.org/sigs/distutils-sig/',
       install_requires=['strictyaml'],
+      tests_require=['pyfakefs'],
       packages=['dot-conf'],
       package_dir={'dot-conf': 'src'},
       )

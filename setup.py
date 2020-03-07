@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 
+import pathlib
 from distutils.core import setup
+
+current_dir = pathlib.Path(__file__).parent
+readme = (current_dir / "README.md").read_text()
 
 setup(name='dot-conf',
       version='0.0.0',
       description='automatically manage dotfiles',
+      long_description=readme,
+      long_description_content_type="text/markdown",
       author='Ben Zhang',
       author_email='benzhangniu@gmail.com',
       url='https://www.python.org/sigs/distutils-sig/',
@@ -12,4 +18,10 @@ setup(name='dot-conf',
       tests_require=['pyfakefs'],
       packages=['dot-conf'],
       package_dir={'dot-conf': 'src'},
+      include_package_data=True,
+      entry_points={
+          "console_scripts": [
+              "dot-conf=dot-conf.__main__:main",
+          ]
+      },
       )

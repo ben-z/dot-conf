@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Current File",
+            "name": "Python: Test Current File",
             "type": "python",
             "request": "test",
             "console": "integratedTerminal"

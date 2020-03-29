@@ -2,6 +2,7 @@ import argparse
 import logging
 from .dcconfig import DCConfig
 from .dcutils import str2bool
+from .version import __version__
 
 logging.basicConfig(format='%(message)s')
 logger = logging.getLogger('dot-conf')
@@ -12,6 +13,7 @@ def main():
 
     parser.add_argument('filenames', metavar='filename', type=str, nargs='+',
                         help='The name of a configuration files')
+    parser.add_argument('--version', action='version', version='%(prog)s {}'.format(__version__))
 
     args = parser.parse_args()
 

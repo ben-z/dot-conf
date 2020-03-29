@@ -45,7 +45,7 @@ class DCConfig():
                 logger.info(
                     "Preparing to link {} -> {}".format(src, dest))
 
-                if dest.exists():
+                if dest.exists() or dest.is_symlink(): # exists() returns false for orphan symlinks
                     backup_path = Path(self.backup_directory,
                                        "{}.{}.bak".format(dest.name, time.time()))
                     logger.info("Backing up {} to {}".format(dest, backup_path))

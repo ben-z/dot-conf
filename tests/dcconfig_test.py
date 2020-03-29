@@ -50,6 +50,7 @@ class TestDCConfig(TestCase):
             self.assertEqual(f.read(), 'some-content')
 
     # TODO: test when the destination is a symlink
+    # TODO: test when the destination is a symlink and the target does not exist
 
 
 if __name__ == "__main__":

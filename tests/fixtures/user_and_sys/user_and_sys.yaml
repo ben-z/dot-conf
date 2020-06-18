@@ -1,0 +1,8 @@
+backup_directory:
+    ~/.config/backup
+
+symlinks:
+    .vimrc: ~/.vimrc
+
+sys_symlinks:
+    .bashrc: /etc/bashrc

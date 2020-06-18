@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from pyfakefs.fake_filesystem_unittest import TestCase
 from unittest import mock
-from src.dcconfig import DCConfig
+from src.dcconfig import DCConfig, Scope
 from src.dcutils import absp
 
 logging.basicConfig()
@@ -27,7 +27,7 @@ class TestDCConfig(TestCase):
             fixture_path, 'basic_config', '.vimrc')], absp('~/.vimrc'))
         self.assertEqual(config.symlinks[absp(
             fixture_path, 'basic_config', '.bashrc')], absp('~/.bashrc'))
-        config.apply()
+        config.apply(Scope.USER)
 
         self.assertTrue(Path(Path.home(), '.vimrc').is_symlink())
         self.assertEqual(Path(Path.home(), '.vimrc').resolve(),
@@ -44,7 +44,7 @@ class TestDCConfig(TestCase):
         self.fs.create_file(absp('~/.vimrc'), contents='some-content')
 
         config = DCConfig.from_yaml(os.path.join(fixture_path, 'basic_config/basic_config.yaml'))
-        config.apply()
+        config.apply(Scope.USER)
         self.assertTrue(Path(Path.home(), '.config/backup', '.vimrc.12345.bak').exists())
         with open(Path(Path.home(), '.config/backup', '.vimrc.12345.bak')) as f:
             self.assertEqual(f.read(), 'some-content')

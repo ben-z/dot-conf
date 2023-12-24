@@ -4,11 +4,17 @@
 
 Automatically configure modular dotfiles
 
-### Getting started
+## Getting started
+
+Install the package:
 
 ```bash
-pip install -r requirements.txt
-python3 setup.py install --user
-
-dot-conf
+python setup.py install
 ```
+
+Run the program:
+
+```bash
+dot-conf .conf.yaml
+```
+

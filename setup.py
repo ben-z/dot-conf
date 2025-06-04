@@ -8,7 +8,7 @@ current_dir = pathlib.Path(__file__).parent
 readme = (current_dir / "README.md").read_text()
 
 ver_dict = {}
-ver_path = convert_path('src/version.py')
+ver_path = convert_path('dotconf/version.py')
 with open(ver_path) as ver_file:
     exec(ver_file.read(), ver_dict)
 
@@ -23,12 +23,12 @@ setup(name='dot-conf',
       python_requires='>=3.7',
       install_requires=['strictyaml'],
       tests_require=['pyfakefs'],
-      packages=['dc'],
-      package_dir={'dc': 'src'},
+      packages=["dotconf"],
+        package_dir={"dotconf": "dotconf"},
       include_package_data=True,
       entry_points={
           "console_scripts": [
-              "dot-conf=dc.__main__:main",
+              "dot-conf=dotconf.__main__:main",
           ]
       },
       )

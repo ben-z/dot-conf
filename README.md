@@ -6,15 +6,21 @@ Automatically configure modular dotfiles
 
 ## Getting started
 
-Install the package:
+Install the package for development:
 
 ```bash
-python setup.py install
+pip install -e .
 ```
 
 Run the program:
 
 ```bash
 dot-conf .conf.yaml
+```
+
+Run the tests:
+
+```bash
+PYTHONPATH=. pytest
 ```
 

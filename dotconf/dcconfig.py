@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from enum import Enum
 import logging
-import os
 import shutil
 import time
-from collections import namedtuple
-from enum import Enum
 from pathlib import Path
-from strictyaml import load as load_yaml, Map, MapPattern, Str, Int, Bool, Optional, Seq, EmptyDict, YAMLError
-from typing import NamedTuple, Dict, Union, Sequence
+from typing import Dict, Sequence, Union
+
+from strictyaml import EmptyDict, Map, MapPattern, Optional, Seq, Str, load as load_yaml
+
 from .dcutils import absp
 
 
@@ -26,19 +27,30 @@ YAMLSchema = Map({"backup_directory": Str(),
                   Optional("sys_symlinks", default={}): MapPattern(Str(), Str() | Seq(Str())) | EmptyDict(),
                 })
 
-class DCConfig():
+@dataclass
+class DCConfig:
+    """Representation of a dot-conf configuration file."""
+
     config_path: Path
     backup_directory: Path
-    symlinks: Dict[Path, Union[Path, Sequence[Path]]]
-    sys_symlinks: Dict[Path, Union[Path, Sequence[Path]]]
+    symlinks: Dict[Path, Union[Path, Sequence[Path]]] = field(default_factory=dict)
+    sys_symlinks: Dict[Path, Union[Path, Sequence[Path]]] = field(default_factory=dict)
 
-    def __init__(self, config_path, backup_directory, symlinks, sys_symlinks, **kwargs):
-        self.config_path = absp(config_path)
-        self.backup_directory = absp(backup_directory)
-        self.symlinks = dict([[absp(self.config_path.parent, src), [Path(d).expanduser() for d in dest] if isinstance(
-            dest, list) else Path(dest).expanduser()] for src, dest in symlinks.items()])
-        self.sys_symlinks = dict([[absp(self.config_path.parent, src), [Path(d).expanduser() for d in dest] if isinstance(
-            dest, list) else Path(dest).expanduser()] for src, dest in sys_symlinks.items()])
+    def __post_init__(self) -> None:
+        self.config_path = absp(self.config_path)
+        self.backup_directory = absp(self.backup_directory)
+
+        self.symlinks = {
+            absp(self.config_path.parent, src): [Path(d).expanduser() for d in dest] if isinstance(dest, list)
+            else Path(dest).expanduser()
+            for src, dest in self.symlinks.items()
+        }
+
+        self.sys_symlinks = {
+            absp(self.config_path.parent, src): [Path(d).expanduser() for d in dest] if isinstance(dest, list)
+            else Path(dest).expanduser()
+            for src, dest in self.sys_symlinks.items()
+        }
 
     def requires_root(self):
         return len(self.sys_symlinks) > 0
@@ -86,9 +98,10 @@ class DCConfig():
                 logger.info("Linking {} -> {}".format(src, dest))
                 dest.symlink_to(src)
 
-    @staticmethod
-    def from_yaml(config_path) -> DCConfig:
+    @classmethod
+    def from_yaml(cls, config_path: Path) -> "DCConfig":
+        """Create an instance from a YAML configuration file."""
         with open(config_path) as config_file:
             config = load_yaml(config_file.read(), YAMLSchema)
 
-            return DCConfig(config_path=config_path, **config.data)
+        return cls(config_path=config_path, **config.data)

@@ -1,6 +1,6 @@
 # dot-conf
 
-[![Build Status](https://travis-ci.com/ben-z/dot-conf.svg?token=XoxzU5ytmnXGRFUMpScC&branch=master)](https://travis-ci.com/ben-z/dot-conf)
+[![CI](https://github.com/ben-z/dot-conf/actions/workflows/python-package.yml/badge.svg)](https://github.com/ben-z/dot-conf/actions/workflows/python-package.yml)
 
 Automatically configure modular dotfiles
 

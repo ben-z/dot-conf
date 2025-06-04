@@ -24,3 +24,15 @@ Run the tests:
 PYTHONPATH=. pytest
 ```
 
+## Usage
+
+Configuration files are YAML documents describing which files to link. Execute
+the tool with one or more configuration files:
+
+```bash
+python -m dotconf path/to/config.yaml
+```
+
+Integration tests exercise the command-line interface in addition to unit
+tests. They are run along with the regular test suite.
+

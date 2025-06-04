@@ -20,6 +20,7 @@ class TestDCConfig(TestCase):
         self.setUpPyfakefs()
         self.fs.add_real_directory(fixture_path)
         self.fs.create_dir('/etc')
+        self.fs.create_dir(Path.home())
 
     def test_loads_and_applies_basic_config(self):
         config = DCConfig.from_yaml(os.path.join(fixture_path, 'basic_config/basic_config.yaml'))
@@ -88,8 +89,33 @@ class TestDCConfig(TestCase):
         with open(Path(Path.home(), '.config/backup', '.vimrc.12345.bak')) as f:
             self.assertEqual(f.read(), 'some-content')
 
-    # TODO: test when the destination is a symlink
-    # TODO: test when the destination is a symlink and the target does not exist
+    @mock.patch('time.time', mock.MagicMock(return_value=12345))
+    def test_backs_up_when_dest_is_symlink(self):
+        self.fs.create_file(absp('~/oldvimrc'), contents='old')
+        Path(absp('~/.vimrc')).symlink_to(absp('~/oldvimrc'))
+
+        config = DCConfig.from_yaml(os.path.join(fixture_path, 'basic_config/basic_config.yaml'))
+        config.apply(Scope.USER)
+
+        backup = Path(Path.home(), '.config/backup', '.vimrc.12345.bak')
+        self.assertTrue(backup.is_symlink())
+        self.assertEqual(backup.readlink(), absp('~/oldvimrc'))
+        self.assertEqual(Path(Path.home(), '.vimrc').resolve(),
+                         Path(fixture_path, 'basic_config', '.vimrc').resolve())
+
+    @mock.patch('time.time', mock.MagicMock(return_value=12345))
+    def test_backs_up_when_dest_is_orphan_symlink(self):
+        Path(absp('~/.vimrc')).symlink_to(absp('~/doesnotexist'))
+
+        config = DCConfig.from_yaml(os.path.join(fixture_path, 'basic_config/basic_config.yaml'))
+        config.apply(Scope.USER)
+
+        backup = Path(Path.home(), '.config/backup', '.vimrc.12345.bak')
+        self.assertTrue(backup.is_symlink())
+        self.assertEqual(backup.readlink(), absp('~/doesnotexist'))
+        self.assertEqual(Path(Path.home(), '.vimrc').resolve(),
+                         Path(fixture_path, 'basic_config', '.vimrc').resolve())
+
 
 
 if __name__ == "__main__":

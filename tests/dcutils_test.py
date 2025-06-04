@@ -7,6 +7,10 @@ class TestDCUtils(unittest.TestCase):
         path = absp('~')
         self.assertEqual(path, Path.home())
 
+    def test_absp_resolves_relative(self):
+        here = Path.cwd()
+        self.assertEqual(absp('tests'), (here / 'tests').resolve())
+
     def test_str2bool_true(self):
         for v in ['yes', 'true', 't', 'y', '1', True]:
             self.assertTrue(str2bool(v))

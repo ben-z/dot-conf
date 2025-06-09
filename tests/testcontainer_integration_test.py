@@ -7,9 +7,8 @@ from testcontainers.core.container import DockerContainer
 
 
 class TestContainerIntegration(unittest.TestCase):
+    @unittest.skipIf(shutil.which('docker') is None, 'Docker not available')
     def test_cli_runs_inside_container(self):
-        if shutil.which('docker') is None:
-            self.fail('Docker not available')
 
         project_root = Path(__file__).resolve().parents[1]
         with DockerContainer('python:3.12') as container:

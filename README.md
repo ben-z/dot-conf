@@ -36,7 +36,6 @@ python -m dotconf path/to/config.yaml
 Integration tests exercise the command-line interface in addition to unit
 tests. They are run along with the regular test suite.
 
-Container-based integration tests rely on [testcontainers](https://github.com/testcontainers/testcontainers-python)
-and require Docker. If Docker is unavailable these tests will fail with an error
-so make sure the Docker daemon is running.
+Container-based integration tests rely on [testcontainers](https://github.com/testcontainers/testcontainers-python).
+They are skipped if Docker isn't available.
 

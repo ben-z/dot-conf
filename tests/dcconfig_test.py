@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from pyfakefs.fake_filesystem_unittest import TestCase
 from unittest import mock
-from src.dcconfig import DCConfig, Scope
-from src.dcutils import absp
+from dot_conf.dcconfig import DCConfig, Scope
+from dot_conf.dcutils import absp
 
 logging.basicConfig()
 logger = logging.getLogger('dot-conf')

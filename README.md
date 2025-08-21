@@ -59,6 +59,21 @@ Run tests:
 python -m unittest discover -s tests -p '*_test.py'
 ```
 
+## Troubleshooting
+
+If installation produces a package named `UNKNOWN` or the `dot-conf` command is missing, this usually means your version of pip or setuptools is too old and does not respect `pyproject.toml` builds.
+
+To check your setuptools version, run:
+```bash
+python3 -m pip show setuptools
+```
+Setuptools must be at least version 61.0, and pip should be modern (version 23 or later).
+
+To upgrade pip and setuptools to appropriate versions, run:
+```bash
+python3 -m pip install "setuptools>=61" "pip>=23" wheel
+```
+
 ## License
 
 MIT

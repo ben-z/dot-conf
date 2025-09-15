@@ -40,6 +40,8 @@ Create a configuration file (e.g., `.conf.yaml`) and run:
 dot-conf .conf.yaml
 ```
 
+Note that the bin directory may not already exist in path. E.g.: `$HOME/Library/Python/3.9/bin/dot-conf`.
+
 ## Configuration
 
 Example configuration:

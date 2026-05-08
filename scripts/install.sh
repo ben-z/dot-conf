@@ -7,19 +7,23 @@ BIN_NAME="dot-conf"
 os="$(uname -s)"
 arch="$(uname -m)"
 
-case "$os" in
-  Linux) os_part="unknown-linux-gnu" ;;
-  Darwin) os_part="apple-darwin" ;;
-  *) echo "Unsupported OS: $os"; exit 1 ;;
+case "$os:$arch" in
+  Linux:x86_64|Linux:amd64)
+    target="x86_64-unknown-linux-gnu"
+    ;;
+  Darwin:x86_64|Darwin:amd64)
+    target="x86_64-apple-darwin"
+    ;;
+  Darwin:arm64|Darwin:aarch64)
+    target="aarch64-apple-darwin"
+    ;;
+  *)
+    echo "Unsupported OS/architecture: $os/$arch"
+    echo "See https://github.com/${REPO}/releases/latest for published artifacts."
+    exit 1
+    ;;
 esac
 
-case "$arch" in
-  x86_64|amd64) arch_part="x86_64" ;;
-  arm64|aarch64) arch_part="aarch64" ;;
-  *) echo "Unsupported architecture: $arch"; exit 1 ;;
-esac
-
-target="${arch_part}-${os_part}"
 archive="${BIN_NAME}-${target}.tar.gz"
 url="https://github.com/${REPO}/releases/latest/download/${archive}"
 checksum_url="${url}.sha256"

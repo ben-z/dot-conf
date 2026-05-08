@@ -1,3 +1,6 @@
+#![deny(missing_docs)]
+//! Apply dotfile symlink configurations described by YAML.
+
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,10 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+/// Which configured links to apply.
+///
+/// [`Scope::All`] applies system links first, so a system-link failure aborts
+/// before user state is touched. That ordering is part of the failure behavior
+/// covered by integration tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scope {
+    /// Apply system links, then user links.
     All,
+    /// Apply user links only.
     User,
+    /// Apply system links only.
     Sys,
 }
 
@@ -42,6 +53,7 @@ impl OneOrMany {
     }
 }
 
+/// Parsed dot-conf configuration ready to apply.
 #[derive(Debug)]
 pub struct DotConf {
     backup_directory: PathBuf,
@@ -50,31 +62,50 @@ pub struct DotConf {
 }
 
 impl DotConf {
+    /// Load a configuration from a YAML file.
+    ///
+    /// Relative source paths and `backup_directory` are resolved against the
+    /// canonical directory containing the YAML file. Relative destinations are
+    /// resolved against the process current working directory.
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let config_path = resolve_from_cwd(path.as_ref())?;
+        let config_path = config_path
+            .canonicalize()
+            .with_context(|| format!("failed resolving {}", config_path.display()))?;
         let yaml = fs::read_to_string(&config_path)
             .with_context(|| format!("failed reading {}", config_path.display()))?;
-
-        let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_yaml_str(&yaml, base_dir)
-            .with_context(|| format!("failed parsing {}", config_path.display()))
-    }
-
-    pub fn from_yaml_str(yaml: &str, base_dir: &Path) -> Result<Self> {
-        let raw: RawConfig = serde_yml::from_str(yaml)?;
         let cwd = std::env::current_dir().context("failed reading current directory")?;
 
+        let source_base = config_path.parent().unwrap_or_else(|| Path::new("."));
+        Self::from_yaml_str(&yaml, source_base, &cwd)
+            .with_context(|| format!("in {}", config_path.display()))
+    }
+
+    /// Parse a configuration from YAML with explicit path bases.
+    ///
+    /// `source_base` is used for relative source paths and
+    /// `backup_directory`. `destination_base` is used for relative
+    /// destinations. Supplying both bases keeps parsing independent of process
+    /// current directory.
+    pub fn from_yaml_str(yaml: &str, source_base: &Path, destination_base: &Path) -> Result<Self> {
+        let raw: RawConfig = serde_yml::from_str(yaml).context("failed parsing YAML")?;
         Ok(Self {
-            backup_directory: resolve_against(&cwd, &raw.backup_directory),
-            symlinks: normalize_links(base_dir, &cwd, raw.symlinks),
-            sys_symlinks: normalize_links(base_dir, &cwd, raw.sys_symlinks),
+            backup_directory: resolve_against(source_base, &raw.backup_directory)
+                .with_context(|| format!("failed resolving {}", raw.backup_directory.display()))?,
+            symlinks: normalize_links(source_base, destination_base, raw.symlinks)?,
+            sys_symlinks: normalize_links(source_base, destination_base, raw.sys_symlinks)?,
         })
     }
 
+    /// Return whether this configuration includes system links.
     pub fn requires_root(&self) -> bool {
         !self.sys_symlinks.is_empty()
     }
 
+    /// Apply configured symlinks for the requested scope.
+    ///
+    /// Existing file and symlink destinations are backed up before they are
+    /// replaced. Missing source files are skipped with a warning.
     pub fn apply(&self, scope: Scope) -> Result<()> {
         match scope {
             Scope::All => {
@@ -115,51 +146,116 @@ impl DotConf {
 }
 
 fn normalize_links(
-    base_dir: &Path,
-    cwd: &Path,
+    source_base: &Path,
+    destination_base: &Path,
     links: BTreeMap<PathBuf, OneOrMany>,
-) -> BTreeMap<PathBuf, Vec<PathBuf>> {
-    links
-        .into_iter()
-        .map(|(source, dests)| {
-            let source = resolve_against(base_dir, &source);
-            let dests = dests
-                .into_vec()
-                .into_iter()
-                .map(|p| resolve_against(cwd, &p))
-                .collect();
-            (source, dests)
-        })
-        .collect()
+) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>> {
+    let mut normalized = BTreeMap::new();
+    for (source, destinations) in links {
+        let resolved_source = resolve_against(source_base, &source)
+            .with_context(|| format!("failed resolving source {}", source.display()))?;
+        let resolved_destinations = destinations
+            .into_vec()
+            .into_iter()
+            .map(|destination| {
+                resolve_against(destination_base, &destination).with_context(|| {
+                    format!("failed resolving destination {}", destination.display())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        normalized.insert(resolved_source, resolved_destinations);
+    }
+    Ok(normalized)
 }
 
 fn resolve_from_cwd(path: &Path) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed reading current directory")?;
-    Ok(resolve_against(&cwd, path))
+    resolve_against(&cwd, path)
 }
 
-fn resolve_against(base: &Path, path: &Path) -> PathBuf {
-    let expanded = expand_tilde(path);
-    if expanded.is_absolute() {
+fn resolve_against(base: &Path, path: &Path) -> Result<PathBuf> {
+    let expanded = expand_tilde(path)?;
+    Ok(if expanded.is_absolute() {
         expanded
     } else {
         base.join(expanded)
-    }
+    })
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
+#[cfg(unix)]
+fn expand_tilde(path: &Path) -> Result<PathBuf> {
+    let home = home::home_dir();
+    expand_tilde_with_home(path, home.as_deref())
+}
+
+#[cfg(unix)]
+fn expand_tilde_with_home(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    if bytes == b"~" {
+        return Ok(home.map_or_else(|| path.to_path_buf(), Path::to_path_buf));
+    }
+    if let Some(rest) = bytes.strip_prefix(b"~/") {
+        return Ok(home.map_or_else(
+            || path.to_path_buf(),
+            |home| home.join(OsStr::from_bytes(rest)),
+        ));
+    }
+    if bytes.starts_with(b"~") {
+        bail!(
+            "unsupported home path {}; use ~ or ~/ for the current user",
+            path.display()
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(windows)]
+fn expand_tilde(path: &Path) -> Result<PathBuf> {
+    let home = home::home_dir();
+    expand_tilde_with_home(path, home.as_deref())
+}
+
+#[cfg(windows)]
+fn expand_tilde_with_home(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    let raw = path.as_os_str().to_string_lossy();
+    if raw == "~" {
+        return Ok(home.map_or_else(|| path.to_path_buf(), Path::to_path_buf));
+    }
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        return Ok(home.map_or_else(|| path.to_path_buf(), |home| home.join(Path::new(rest))));
+    }
+    if raw.starts_with('~') {
+        bail!(
+            "unsupported home path {}; use ~, ~/, or ~\\ for the current user",
+            path.display()
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let raw = path.to_string_lossy();
     let Some(home) = home::home_dir() else {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     };
 
     if raw == "~" {
-        return home;
+        return Ok(home);
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        return home.join(rest);
+        return Ok(home.join(rest));
     }
-    path.to_path_buf()
+    if raw.starts_with('~') {
+        bail!(
+            "unsupported home path {}; use ~ or ~/ for the current user",
+            path.display()
+        );
+    }
+    Ok(path.to_path_buf())
 }
 
 fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> Result<()> {
@@ -176,11 +272,9 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
 
     if metadata.file_type().is_symlink() {
         let target = symlink_backup_target(destination)?;
-        let target_is_dir = fs::metadata(destination)
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
-        create_symlink(&target, &backup)?;
-        remove_symlink(destination, target_is_dir)?;
+        let kind = symlink_kind(&metadata);
+        create_symlink_with_kind(&target, &backup, kind)?;
+        remove_symlink(destination, kind)?;
         return Ok(());
     }
 
@@ -202,22 +296,13 @@ fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<Pat
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let name = backup_name(destination);
     let hash = path_hash(destination);
+    let backup = backup_directory.join(format!("{name}.{hash:016x}.{ts}.bak"));
 
-    for attempt in 0..1000 {
-        let backup = backup_directory.join(format!("{name}.{hash:016x}.{ts}.{attempt}.bak"));
-        match fs::symlink_metadata(&backup) {
-            Ok(_) => continue,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(backup),
-            Err(err) => {
-                return Err(err).with_context(|| format!("failed inspecting {}", backup.display()));
-            }
-        }
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => bail!("backup path {} already exists", backup.display()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(backup),
+        Err(err) => Err(err).with_context(|| format!("failed inspecting {}", backup.display())),
     }
-
-    bail!(
-        "failed finding unique backup path for {}",
-        destination.display()
-    )
 }
 
 fn symlink_backup_target(destination: &Path) -> Result<PathBuf> {
@@ -291,11 +376,78 @@ fn create_symlink(source: &Path, destination: &Path) -> Result<()> {
     })
 }
 
-fn remove_symlink(path: &Path, target_is_dir: bool) -> Result<()> {
-    let remove = if target_is_dir {
-        symlink::remove_symlink_dir
+#[derive(Clone, Copy)]
+enum SymlinkKind {
+    File,
+    #[cfg(windows)]
+    Dir,
+}
+
+#[cfg(windows)]
+fn symlink_kind(metadata: &fs::Metadata) -> SymlinkKind {
+    use std::os::windows::fs::FileTypeExt;
+
+    if metadata.file_type().is_symlink_dir() {
+        SymlinkKind::Dir
     } else {
-        symlink::remove_symlink_file
+        SymlinkKind::File
+    }
+}
+
+#[cfg(not(windows))]
+fn symlink_kind(_metadata: &fs::Metadata) -> SymlinkKind {
+    SymlinkKind::File
+}
+
+fn create_symlink_with_kind(source: &Path, destination: &Path, kind: SymlinkKind) -> Result<()> {
+    let result = match kind {
+        SymlinkKind::File => symlink::symlink_file(source, destination),
+        #[cfg(windows)]
+        SymlinkKind::Dir => symlink::symlink_dir(source, destination),
     };
-    remove(path).with_context(|| format!("failed removing {}", path.display()))
+    result.with_context(|| {
+        format!(
+            "failed to create symlink {} -> {}",
+            destination.display(),
+            source.display()
+        )
+    })
+}
+
+fn remove_symlink(path: &Path, kind: SymlinkKind) -> Result<()> {
+    // The existing link metadata carries the Windows file/dir distinction even
+    // for dangling links, so reuse it instead of probing the target.
+    let result = match kind {
+        SymlinkKind::File => symlink::remove_symlink_file(path),
+        #[cfg(windows)]
+        SymlinkKind::Dir => symlink::remove_symlink_dir(path),
+    };
+    result.with_context(|| format!("failed removing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_tilde_preserves_non_utf8_suffix() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let path = PathBuf::from(OsString::from_vec(b"~/foo\xffbar".to_vec()));
+        let expanded = expand_tilde_with_home(&path, Some(Path::new("/tmp/home"))).unwrap();
+
+        assert_eq!(expanded.as_os_str().as_bytes(), b"/tmp/home/foo\xffbar");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expand_tilde_accepts_windows_separator() {
+        let expanded =
+            expand_tilde_with_home(Path::new("~\\AppData"), Some(Path::new("C:\\Users\\ben")))
+                .unwrap();
+
+        assert_eq!(expanded, PathBuf::from("C:\\Users\\ben\\AppData"));
+    }
 }

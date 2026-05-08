@@ -233,8 +233,133 @@ fn rejects_unknown_config_keys() {
 backup_dir: ~/.config/misspelled
 "#;
 
-    let err = DotConf::from_yaml_str(yaml, Path::new(".")).unwrap_err();
+    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
     assert!(format!("{err:#}").contains("unknown field"));
+}
+
+#[test]
+#[serial]
+fn rejects_user_home_tilde_forms() {
+    let yaml = "backup_directory: ~other/backup\n";
+
+    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+
+    assert!(format!("{err:#}").contains("unsupported home path"));
+}
+
+#[test]
+#[serial]
+fn resolves_relative_backup_directory_against_config_dir() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        write_file(&cfg_dir.join(".vimrc"), "new");
+        write_file(&home.join(".vimrc"), "old");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            r#"backup_directory: backups
+symlinks:
+  .vimrc: ~/.vimrc
+"#,
+        )
+        .unwrap();
+
+        DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        let backups: Vec<_> = fs::read_dir(cfg_dir.join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
+        assert!(!root.join("backups").exists());
+    });
+}
+
+#[test]
+#[serial]
+fn resolves_sources_against_canonical_config_path() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let real_cfg_dir = root.join("real-cfg");
+    let linked_cfg_dir = root.join("linked-cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&real_cfg_dir).unwrap();
+    fs::create_dir_all(&linked_cfg_dir).unwrap();
+    with_home(&home, || {
+        write_file(&real_cfg_dir.join(".vimrc"), "real");
+        write_file(&linked_cfg_dir.join(".vimrc"), "linked");
+        let real_yaml = real_cfg_dir.join("config.yaml");
+        fs::write(
+            &real_yaml,
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+"#,
+        )
+        .unwrap();
+        let linked_yaml = linked_cfg_dir.join("config.yaml");
+        create_file_symlink(&real_yaml, &linked_yaml);
+
+        DotConf::from_yaml_file(&linked_yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        assert_eq!(
+            home.join(".vimrc").canonicalize().unwrap(),
+            real_cfg_dir.join(".vimrc").canonicalize().unwrap()
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn backs_up_dangling_symlink_destinations() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        write_file(&cfg_dir.join(".vimrc"), "new");
+        let missing_target = home.join("missing-vimrc");
+        create_file_symlink(&missing_target, &home.join(".vimrc"));
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+"#,
+        )
+        .unwrap();
+
+        DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        let backups: Vec<_> = fs::read_dir(home.join(".config/backup"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].is_symlink());
+        assert_eq!(fs::read_link(&backups[0]).unwrap(), missing_target);
+    });
 }
 
 #[test]

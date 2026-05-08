@@ -61,15 +61,16 @@ Options:
 
 ## Behavior notes
 
-- Source paths are resolved relative to the YAML file.
-- Destination paths support `~` expansion.
+- Source paths and relative `backup_directory` paths are resolved relative to the YAML file.
+- Relative destination paths are resolved relative to the current working directory.
+- Destination and backup paths support `~` expansion for the current user's home directory.
 - Missing source files are skipped with a warning.
 - Backup directories are created lazily only when an existing destination is backed up.
 - Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
 
 ## CI and release process
 
-- Pull requests and pushes to `master` run formatting, clippy, and tests on Linux/macOS/Windows.
+- Pull requests and pushes to `master` run dependency audit, formatting, clippy, and tests on Linux/macOS/Windows.
 - Pull requests and pushes to `master` also build release binaries and upload them as workflow artifacts.
 - Creating a tag like `v0.2.0` triggers release automation that builds per-platform archives and publishes them to GitHub Releases.
 

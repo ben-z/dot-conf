@@ -6,6 +6,16 @@ on:
     branches: [master]
 
 jobs:
+  audit:
+    name: audit dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

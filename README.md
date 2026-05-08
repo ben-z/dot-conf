@@ -1,84 +1,55 @@
 # dot-conf
 
-[![Tests](https://github.com/ben-z/dot-conf/actions/workflows/tests.yml/badge.svg)](https://github.com/ben-z/dot-conf/actions/workflows/tests.yml)
+`dot-conf` is a small, elegant Rust CLI for managing dotfiles from a YAML config.
 
-Automatically configure modular dotfiles
+## Why this version
 
-## Features
+- **Simple mental model:** map `source -> destination` symlinks.
+- **Safe updates:** existing destination files are backed up before replacement.
+- **Flexible mapping:** one source can target many destinations.
+- **Intuitive tooling:** `cargo build`, `cargo run`, `cargo test`.
 
-- Simple YAML-based configuration
-- Support for symlinks and file copying
-- Backup of existing dotfiles
-- Cross-platform support
-
-## Installation
-
-### Install using pip
+## Install
 
 ```bash
-pip install git+https://github.com/ben-z/dot-conf.git
+cargo install --path .
 ```
 
-## Development
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/ben-z/dot-conf.git
-   cd dot-conf
-   ```
-
-2. Install in development mode with test dependencies:
-   ```bash
-   pip install -e '.[test]'
-   ```
-
-## Usage
-
-Create a configuration file (e.g., `.conf.yaml`) and run:
-
-```bash
-dot-conf .conf.yaml
-# or
-python3 -m dot_conf .conf.yaml
-```
-
-Note that the bin directory may not already exist in path. E.g.: `$HOME/Library/Python/3.9/bin/dot-conf`.
-
-## Configuration
-
-Example configuration:
+## Quick start
 
 ```yaml
-backup_directory: ~/.dotfiles/backup
+backup_directory: ~/.config/backup
 symlinks:
-  ~/.vimrc: ~/dotfiles/vimrc
-  ~/.gitconfig: ~/dotfiles/gitconfig
+  .vimrc: ~/.vimrc
+  .tmux.conf:
+    - ~/.tmux.conf
+    - ~/.config/tmux/tmux.conf
+sys_symlinks:
+  .sysrc: /etc/sysrc
 ```
+
+Then run:
+
+```bash
+dot-conf config.yaml
+# or
+cargo run -- config.yaml
+```
+
+Options:
+
+- `--user-only` only apply `symlinks`
+- `--sys-only` only apply `sys_symlinks`
+
+## Behavior notes
+
+- Source paths are resolved relative to the YAML file.
+- Destination paths support `~` expansion.
+- Missing source files are skipped (no error).
 
 ## Development
 
-Run tests:
-
 ```bash
-python -m unittest discover -s tests -p '*_test.py'
+cargo fmt
+cargo test
 ```
-
-## Troubleshooting
-
-If installation produces a package named `UNKNOWN` or the `dot-conf` command is missing, this usually means your version of pip or setuptools is too old and does not respect `pyproject.toml` builds.
-
-To check your setuptools version, run:
-```bash
-python3 -m pip show setuptools
-```
-Setuptools must be at least version 61.0, and pip should be modern (version 23 or later).
-
-To upgrade pip and setuptools to appropriate versions, run:
-```bash
-python3 -m pip install "setuptools>=61" "pip>=23" wheel
-```
-
-## License
-
-MIT
-

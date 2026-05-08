@@ -1,3 +1,4 @@
+use serial_test::serial;
 use std::fs;
 use std::path::Path;
 
@@ -12,6 +13,7 @@ fn write_file(path: &Path, contents: &str) {
 }
 
 #[test]
+#[serial]
 fn loads_and_applies_basic_config() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -51,6 +53,7 @@ symlinks:
 }
 
 #[test]
+#[serial]
 fn supports_multiple_destinations() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -84,6 +87,7 @@ symlinks:
 }
 
 #[test]
+#[serial]
 fn creates_backup_for_existing_files() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -120,6 +124,7 @@ symlinks:
 }
 
 #[test]
+#[serial]
 fn skips_nonexistent_sources() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -147,6 +152,7 @@ symlinks:
 }
 
 #[test]
+#[serial]
 fn applies_system_scope_only() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();

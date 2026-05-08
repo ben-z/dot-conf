@@ -3,7 +3,7 @@ name = "dot-conf"
 version = "0.1.0"
 edition = "2021"
 description = "Automatically configure modular dotfiles"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [dependencies]
 anyhow = "1"

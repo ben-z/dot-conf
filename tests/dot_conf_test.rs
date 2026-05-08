@@ -21,6 +21,16 @@ fn set_home(path: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn create_file_symlink(source: &Path, destination: &Path) {
+    std::os::unix::fs::symlink(source, destination).unwrap();
+}
+
+#[cfg(windows)]
+fn create_file_symlink(source: &Path, destination: &Path) {
+    std::os::windows::fs::symlink_file(source, destination).unwrap();
+}
+
 #[test]
 #[serial]
 fn loads_and_applies_basic_config() {
@@ -55,10 +65,7 @@ symlinks:
         cfg_dir.join(".vimrc").canonicalize().unwrap()
     );
     assert!(home.join(".bashrc").is_symlink());
-    assert_eq!(
-        fs::read_dir(home.join(".config/backup")).unwrap().count(),
-        0
-    );
+    assert!(!home.join(".config/backup").exists());
 }
 
 #[test]
@@ -130,6 +137,51 @@ symlinks:
         .collect();
     assert_eq!(backups.len(), 1);
     assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
+}
+
+#[test]
+#[serial]
+fn backs_up_relative_symlink_targets_as_resolved_links() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    let links_dir = home.join("links");
+    let targets_dir = home.join("targets");
+    fs::create_dir_all(&links_dir).unwrap();
+    fs::create_dir_all(&targets_dir).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    set_home(&home);
+
+    write_file(&cfg_dir.join(".vimrc"), "new");
+    write_file(&targets_dir.join(".vimrc"), "old");
+    create_file_symlink(Path::new("../targets/.vimrc"), &links_dir.join(".vimrc"));
+
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            "backup_directory: ~/.config/backup\nsymlinks:\n  .vimrc: {}\n",
+            links_dir.join(".vimrc").display()
+        ),
+    )
+    .unwrap();
+
+    DotConf::from_yaml_file(&yaml)
+        .unwrap()
+        .apply(Scope::User)
+        .unwrap();
+
+    let backups: Vec<_> = fs::read_dir(home.join(".config/backup"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert!(backups[0].is_symlink());
+    assert_eq!(
+        backups[0].canonicalize().unwrap(),
+        targets_dir.join(".vimrc").canonicalize().unwrap()
+    );
 }
 
 #[test]
@@ -286,4 +338,5 @@ fn applies_system_scope_only() {
     assert!(conf.requires_root());
     conf.apply(Scope::Sys).unwrap();
     assert!(etc.join("sysrc").is_symlink());
+    assert!(!home.join(".config/backup").exists());
 }

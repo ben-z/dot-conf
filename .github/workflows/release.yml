@@ -50,8 +50,21 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.bin }} -DestinationPath ${{ matrix.archive }}
+      - name: Create checksum (unix)
+        if: runner.os != 'Windows'
+        run: shasum -a 256 ${{ matrix.archive }} > ${{ matrix.archive }}.sha256
+      - name: Create checksum (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 $env:ARCHIVE).Hash.ToLower()
+          "$hash  $env:ARCHIVE" | Out-File -Encoding ascii "$env:ARCHIVE.sha256"
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.archive }}
+          files: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
           generate_release_notes: true

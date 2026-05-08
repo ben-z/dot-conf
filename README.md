@@ -63,7 +63,9 @@ Options:
 
 - Source paths are resolved relative to the YAML file.
 - Destination paths support `~` expansion.
-- Missing source files are skipped (no error).
+- Missing source files are skipped with a warning.
+- Backup directories are created lazily only when an existing destination is backed up.
+- Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
 
 ## CI and release process
 
@@ -78,3 +80,7 @@ cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).

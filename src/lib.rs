@@ -76,9 +76,6 @@ impl DotConf {
     }
 
     pub fn apply(&self, scope: Scope) -> Result<()> {
-        fs::create_dir_all(&self.backup_directory)
-            .with_context(|| format!("failed creating {}", self.backup_directory.display()))?;
-
         match scope {
             Scope::All => {
                 self.apply_links(&self.sys_symlinks)?;
@@ -94,7 +91,10 @@ impl DotConf {
         for (source, destinations) in links {
             let source_metadata = match fs::metadata(source) {
                 Ok(metadata) => metadata,
-                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    log::warn!("skipping missing source {}", source.display());
+                    continue;
+                }
                 Err(err) => {
                     return Err(err)
                         .with_context(|| format!("failed inspecting {}", source.display()));
@@ -190,7 +190,7 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
     let backup = unique_backup_path(backup_directory, destination)?;
 
     if metadata.file_type().is_symlink() {
-        let target = fs::read_link(destination)?;
+        let target = symlink_backup_target(destination)?;
         let target_is_dir = fs::metadata(destination)
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
@@ -212,6 +212,9 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
 }
 
 fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(backup_directory)
+        .with_context(|| format!("failed creating {}", backup_directory.display()))?;
+
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let name = backup_name(destination);
     let hash = path_hash(destination);
@@ -231,6 +234,19 @@ fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<Pat
         "failed finding unique backup path for {}",
         destination.display()
     )
+}
+
+fn symlink_backup_target(destination: &Path) -> Result<PathBuf> {
+    let target = fs::read_link(destination)
+        .with_context(|| format!("failed reading symlink {}", destination.display()))?;
+    if target.is_absolute() {
+        return Ok(target);
+    }
+
+    Ok(destination
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(target))
 }
 
 fn backup_name(destination: &Path) -> String {

@@ -1,6 +1,8 @@
 use clap::Parser;
 use dot_conf::{DotConf, Scope};
+#[cfg(unix)]
 use std::env;
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 
@@ -8,7 +10,7 @@ use std::process::Command;
 #[command(name = "dot-conf", about = "Apply dot-conf configuration files")]
 struct Cli {
     #[arg(required = true)]
-    filenames: Vec<String>,
+    filenames: Vec<PathBuf>,
     #[arg(long, conflicts_with = "user_only")]
     sys_only: bool,
     #[arg(long, conflicts_with = "sys_only")]
@@ -30,16 +32,12 @@ fn main() -> anyhow::Result<()> {
             config.apply(Scope::All)?;
         } else {
             config.apply(Scope::User)?;
-            system_config_filenames.push(filename.clone());
+            system_config_filenames.push(filename);
         }
     }
 
     if !system_config_filenames.is_empty() {
         apply_system_config_with_elevation(&system_config_filenames)?;
-    }
-
-    if env::var_os("DOTCONF_SUBPROCESS").is_none() {
-        println!("Done!");
     }
 
     Ok(())
@@ -56,16 +54,15 @@ fn is_elevated() -> bool {
 }
 
 #[cfg(unix)]
-fn apply_system_config_with_elevation(filenames: &[String]) -> anyhow::Result<()> {
-    println!("Enter password here to apply system config:");
+fn apply_system_config_with_elevation(filenames: &[&PathBuf]) -> anyhow::Result<()> {
+    eprintln!("Enter password here to apply system config:");
     let executable = env::current_exe()?;
     let status = Command::new("sudo")
         .arg("-E")
         .arg(executable)
         .arg("--sys-only")
         .arg("--")
-        .args(filenames)
-        .env("DOTCONF_SUBPROCESS", "true")
+        .args(filenames.iter().map(|path| path.as_os_str()))
         .status()?;
 
     let _ = Command::new("sudo").arg("-k").status();
@@ -78,7 +75,7 @@ fn apply_system_config_with_elevation(filenames: &[String]) -> anyhow::Result<()
 }
 
 #[cfg(not(unix))]
-fn apply_system_config_with_elevation(_filenames: &[String]) -> anyhow::Result<()> {
+fn apply_system_config_with_elevation(_filenames: &[&PathBuf]) -> anyhow::Result<()> {
     anyhow::bail!(
         "system config requires elevated privileges; rerun with --sys-only from an elevated shell"
     )

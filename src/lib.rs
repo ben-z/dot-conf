@@ -44,30 +44,30 @@ impl OneOrMany {
 
 #[derive(Debug)]
 pub struct DotConf {
-    pub config_path: PathBuf,
-    pub backup_directory: PathBuf,
-    pub symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
-    pub sys_symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
+    backup_directory: PathBuf,
+    symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
+    sys_symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl DotConf {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
-        let config_path = absolutize(path.as_ref(), None);
+        let config_path = resolve_from_cwd(path.as_ref())?;
         let yaml = fs::read_to_string(&config_path)
             .with_context(|| format!("failed reading {}", config_path.display()))?;
-        let raw: RawConfig = serde_yaml::from_str(&yaml)
-            .with_context(|| format!("failed parsing {}", config_path.display()))?;
 
-        let base_dir = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        Self::from_yaml_str(&yaml, base_dir)
+            .with_context(|| format!("failed parsing {}", config_path.display()))
+    }
+
+    pub fn from_yaml_str(yaml: &str, base_dir: &Path) -> Result<Self> {
+        let raw: RawConfig = serde_yml::from_str(yaml)?;
+        let cwd = std::env::current_dir().context("failed reading current directory")?;
 
         Ok(Self {
-            config_path,
-            backup_directory: absolutize(&raw.backup_directory, None),
-            symlinks: normalize_links(&base_dir, raw.symlinks),
-            sys_symlinks: normalize_links(&base_dir, raw.sys_symlinks),
+            backup_directory: resolve_against(&cwd, &raw.backup_directory),
+            symlinks: normalize_links(base_dir, &cwd, raw.symlinks),
+            sys_symlinks: normalize_links(base_dir, &cwd, raw.sys_symlinks),
         })
     }
 
@@ -89,8 +89,8 @@ impl DotConf {
 
     fn apply_links(&self, links: &BTreeMap<PathBuf, Vec<PathBuf>>) -> Result<()> {
         for (source, destinations) in links {
-            let source_metadata = match fs::metadata(source) {
-                Ok(metadata) => metadata,
+            match fs::metadata(source) {
+                Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {
                     log::warn!("skipping missing source {}", source.display());
                     continue;
@@ -107,7 +107,7 @@ impl DotConf {
                         .with_context(|| format!("failed creating {}", parent.display()))?;
                 }
                 backup_and_remove_if_exists(&self.backup_directory, destination)?;
-                create_symlink(source, destination, source_metadata.is_dir())?;
+                create_symlink(source, destination)?;
             }
         }
         Ok(())
@@ -116,65 +116,50 @@ impl DotConf {
 
 fn normalize_links(
     base_dir: &Path,
+    cwd: &Path,
     links: BTreeMap<PathBuf, OneOrMany>,
 ) -> BTreeMap<PathBuf, Vec<PathBuf>> {
     links
         .into_iter()
         .map(|(source, dests)| {
-            let source = absolutize(source, Some(base_dir));
+            let source = resolve_against(base_dir, &source);
             let dests = dests
                 .into_vec()
                 .into_iter()
-                .map(|p| absolutize(p, None))
+                .map(|p| resolve_against(cwd, &p))
                 .collect();
             (source, dests)
         })
         .collect()
 }
 
-fn absolutize(path: impl AsRef<Path>, relative_to: Option<&Path>) -> PathBuf {
-    let path = path.as_ref();
-    let with_tilde = expand_home(path);
+fn resolve_from_cwd(path: &Path) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed reading current directory")?;
+    Ok(resolve_against(&cwd, path))
+}
 
-    if with_tilde.is_absolute() {
-        with_tilde
-    } else if let Some(base) = relative_to {
-        base.join(with_tilde)
+fn resolve_against(base: &Path, path: &Path) -> PathBuf {
+    let expanded = expand_tilde(path);
+    if expanded.is_absolute() {
+        expanded
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(with_tilde)
+        base.join(expanded)
     }
 }
 
-fn expand_home(path: &Path) -> PathBuf {
+fn expand_tilde(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
+    let Some(home) = home::home_dir() else {
+        return path.to_path_buf();
+    };
+
     if raw == "~" {
-        return home_dir().unwrap_or_else(|_| path.to_path_buf());
+        return home;
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        return home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|_| path.to_path_buf());
+        return home.join(rest);
     }
     path.to_path_buf()
-}
-
-fn home_dir() -> std::result::Result<PathBuf, std::env::VarError> {
-    #[cfg(windows)]
-    {
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            return Ok(PathBuf::from(home));
-        }
-        if let (Some(mut drive), Some(path)) =
-            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-        {
-            drive.push(path);
-            return Ok(PathBuf::from(drive));
-        }
-    }
-
-    std::env::var("HOME").map(PathBuf::from)
 }
 
 fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> Result<()> {
@@ -191,17 +176,13 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
 
     if metadata.file_type().is_symlink() {
         let target = symlink_backup_target(destination)?;
-        let target_is_dir = fs::metadata(destination)
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
-        create_symlink(&target, &backup, target_is_dir)?;
-        remove_symlink(destination, target_is_dir)?;
+        create_symlink(&target, &backup)?;
+        remove_symlink(destination)?;
         return Ok(());
     }
 
     if metadata.is_file() {
-        fs::copy(destination, &backup)?;
-        fs::remove_file(destination)?;
+        move_or_copy_file(destination, &backup)?;
         return Ok(());
     }
 
@@ -278,54 +259,36 @@ fn path_hash(path: &Path) -> u64 {
     hasher.finish()
 }
 
-fn create_symlink(source: &Path, destination: &Path, source_is_dir: bool) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = source_is_dir;
-        std::os::unix::fs::symlink(source, destination).with_context(|| {
-            format!(
-                "failed to create symlink {} -> {}",
-                destination.display(),
-                source.display()
-            )
-        })?;
+fn move_or_copy_file(source: &Path, destination: &Path) -> Result<()> {
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::CrossesDevices => {
+            fs::copy(source, destination).with_context(|| {
+                format!(
+                    "failed copying {} -> {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            fs::remove_file(source)
+                .with_context(|| format!("failed removing {}", source.display()))?;
+            Ok(())
+        }
+        Err(err) => Err(err).with_context(|| format!("failed moving {}", source.display())),
     }
-
-    #[cfg(windows)]
-    {
-        let symlink = if source_is_dir {
-            std::os::windows::fs::symlink_dir
-        } else {
-            std::os::windows::fs::symlink_file
-        };
-        symlink(source, destination).with_context(|| {
-            format!(
-                "failed to create symlink {} -> {}",
-                destination.display(),
-                source.display()
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
-fn remove_symlink(path: &Path, target_is_dir: bool) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let _ = target_is_dir;
-        fs::remove_file(path).with_context(|| format!("failed removing {}", path.display()))?;
-    }
+fn create_symlink(source: &Path, destination: &Path) -> Result<()> {
+    symlink::symlink_auto(source, destination).with_context(|| {
+        format!(
+            "failed to create symlink {} -> {}",
+            destination.display(),
+            source.display()
+        )
+    })
+}
 
-    #[cfg(windows)]
-    {
-        let remove = if target_is_dir {
-            fs::remove_dir
-        } else {
-            fs::remove_file
-        };
-        remove(path).with_context(|| format!("failed removing {}", path.display()))?;
-    }
-
-    Ok(())
+fn remove_symlink(path: &Path) -> Result<()> {
+    symlink::remove_symlink_auto(path)
+        .with_context(|| format!("failed removing {}", path.display()))
 }

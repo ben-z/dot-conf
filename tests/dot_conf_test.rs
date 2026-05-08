@@ -12,6 +12,15 @@ fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
+fn set_home(path: &Path) {
+    unsafe {
+        std::env::set_var("HOME", path);
+        std::env::set_var("USERPROFILE", path);
+        std::env::remove_var("HOMEDRIVE");
+        std::env::remove_var("HOMEPATH");
+    }
+}
+
 #[test]
 #[serial]
 fn loads_and_applies_basic_config() {
@@ -21,7 +30,7 @@ fn loads_and_applies_basic_config() {
     let cfg_dir = root.join("cfg");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
-    unsafe { std::env::set_var("HOME", &home) };
+    set_home(&home);
 
     write_file(&cfg_dir.join(".vimrc"), "set nu");
     write_file(&cfg_dir.join(".bashrc"), "alias ll='ls -al'");
@@ -61,7 +70,7 @@ fn supports_multiple_destinations() {
     let cfg_dir = root.join("cfg");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
-    unsafe { std::env::set_var("HOME", &home) };
+    set_home(&home);
 
     write_file(&cfg_dir.join(".tmux.conf"), "set -g mouse on");
 
@@ -95,7 +104,7 @@ fn creates_backup_for_existing_files() {
     let cfg_dir = root.join("cfg");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
-    unsafe { std::env::set_var("HOME", &home) };
+    set_home(&home);
 
     write_file(&cfg_dir.join(".vimrc"), "new");
     write_file(&home.join(".vimrc"), "old");
@@ -125,6 +134,104 @@ symlinks:
 
 #[test]
 #[serial]
+fn creates_distinct_backups_for_matching_destination_names() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    set_home(&home);
+
+    write_file(&cfg_dir.join("first"), "new-a");
+    write_file(&cfg_dir.join("second"), "new-b");
+    write_file(&home.join("one/config"), "old-a");
+    write_file(&home.join("two/config"), "old-b");
+
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            "backup_directory: ~/.config/backup\nsymlinks:\n  first: {}\n  second: {}\n",
+            home.join("one/config").display(),
+            home.join("two/config").display()
+        ),
+    )
+    .unwrap();
+
+    DotConf::from_yaml_file(&yaml)
+        .unwrap()
+        .apply(Scope::User)
+        .unwrap();
+
+    let mut backup_contents: Vec<_> = fs::read_dir(home.join(".config/backup"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    backup_contents.sort();
+    assert_eq!(backup_contents, vec!["old-a", "old-b"]);
+}
+
+#[test]
+#[serial]
+fn rejects_unknown_config_keys() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    set_home(&home);
+
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        r#"backup_directory: ~/.config/backup
+backup_dir: ~/.config/misspelled
+"#,
+    )
+    .unwrap();
+
+    let err = DotConf::from_yaml_file(&yaml).unwrap_err();
+    assert!(format!("{err:#}").contains("unknown field"));
+}
+
+#[test]
+#[serial]
+fn all_scope_does_not_apply_user_links_after_system_link_failure() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    let blocked_parent = root.join("blocked");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(&blocked_parent, "not a directory").unwrap();
+    set_home(&home);
+
+    write_file(&cfg_dir.join(".vimrc"), "user");
+    write_file(&cfg_dir.join(".sysrc"), "sys");
+
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            "backup_directory: ~/.config/backup\nsymlinks:\n  .vimrc: ~/.vimrc\nsys_symlinks:\n  .sysrc: {}\n",
+            blocked_parent.join("sysrc").display()
+        ),
+    )
+    .unwrap();
+
+    let err = DotConf::from_yaml_file(&yaml)
+        .unwrap()
+        .apply(Scope::All)
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("failed creating"));
+    assert!(!home.join(".vimrc").exists());
+}
+
+#[test]
+#[serial]
 fn skips_nonexistent_sources() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -132,7 +239,7 @@ fn skips_nonexistent_sources() {
     let cfg_dir = root.join("cfg");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
-    unsafe { std::env::set_var("HOME", &home) };
+    set_home(&home);
 
     let yaml = cfg_dir.join("config.yaml");
     fs::write(
@@ -162,7 +269,7 @@ fn applies_system_scope_only() {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
     fs::create_dir_all(&etc).unwrap();
-    unsafe { std::env::set_var("HOME", &home) };
+    set_home(&home);
 
     write_file(&cfg_dir.join(".sysrc"), "sys");
     let yaml = cfg_dir.join("config.yaml");

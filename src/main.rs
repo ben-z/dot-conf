@@ -9,9 +9,9 @@ use std::process::Command;
 struct Cli {
     #[arg(required = true)]
     filenames: Vec<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "user_only")]
     sys_only: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sys_only")]
     user_only: bool,
 }
 
@@ -47,16 +47,12 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 fn is_elevated() -> bool {
-    let Ok(output) = Command::new("id").arg("-u").output() else {
-        return false;
-    };
-
-    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0"
+    unsafe { libc::geteuid() == 0 }
 }
 
 #[cfg(not(unix))]
 fn is_elevated() -> bool {
-    true
+    false
 }
 
 #[cfg(unix)]
@@ -67,6 +63,7 @@ fn apply_system_config_with_elevation(filenames: &[String]) -> anyhow::Result<()
         .arg("-E")
         .arg(executable)
         .arg("--sys-only")
+        .arg("--")
         .args(filenames)
         .env("DOTCONF_SUBPROCESS", "true")
         .status()?;
@@ -85,4 +82,15 @@ fn apply_system_config_with_elevation(_filenames: &[String]) -> anyhow::Result<(
     anyhow::bail!(
         "system config requires elevated privileges; rerun with --sys-only from an elevated shell"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_sys_only_with_user_only() {
+        let result = Cli::try_parse_from(["dot-conf", "--sys-only", "--user-only", "config.yaml"]);
+        assert!(result.is_err());
+    }
 }

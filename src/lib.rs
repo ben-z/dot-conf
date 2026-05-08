@@ -195,7 +195,7 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
         create_symlink(&target, &backup, target_is_dir)?;
-        fs::remove_file(destination)?;
+        remove_symlink(destination, target_is_dir)?;
         return Ok(());
     }
 
@@ -289,6 +289,26 @@ fn create_symlink(source: &Path, destination: &Path, source_is_dir: bool) -> Res
                 source.display()
             )
         })?;
+    }
+
+    Ok(())
+}
+
+fn remove_symlink(path: &Path, target_is_dir: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = target_is_dir;
+        fs::remove_file(path).with_context(|| format!("failed removing {}", path.display()))?;
+    }
+
+    #[cfg(windows)]
+    {
+        let remove = if target_is_dir {
+            fs::remove_dir
+        } else {
+            fs::remove_file
+        };
+        remove(path).with_context(|| format!("failed removing {}", path.display()))?;
     }
 
     Ok(())

@@ -1,84 +1,87 @@
 # dot-conf
 
-[![Tests](https://github.com/ben-z/dot-conf/actions/workflows/tests.yml/badge.svg)](https://github.com/ben-z/dot-conf/actions/workflows/tests.yml)
+`dot-conf` is a small, elegant Rust CLI for managing dotfiles from a YAML config.
 
-Automatically configure modular dotfiles
+## Why this version
 
-## Features
+- **Simple mental model:** map `source -> destination` symlinks.
+- **Safe updates:** existing destination files are backed up before replacement.
+- **Flexible mapping:** one source can target many destinations.
+- **Intuitive tooling:** install from prebuilt binaries or `cargo`.
 
-- Simple YAML-based configuration
-- Support for symlinks and file copying
-- Backup of existing dotfiles
-- Cross-platform support
+## Install (non-dev)
 
-## Installation
-
-### Install using pip
+### Option 1: one-line installer (Linux/macOS)
 
 ```bash
-pip install git+https://github.com/ben-z/dot-conf.git
+curl -fsSL https://raw.githubusercontent.com/ben-z/dot-conf/master/scripts/install.sh | bash
 ```
 
-## Development
+By default, this installs to `~/.local/bin/dot-conf`. Set `DOT_CONF_INSTALL_DIR` to override.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/ben-z/dot-conf.git
-   cd dot-conf
-   ```
+### Option 2: download prebuilt binary from GitHub Releases
 
-2. Install in development mode with test dependencies:
-   ```bash
-   pip install -e '.[test]'
-   ```
+1. Go to: <https://github.com/ben-z/dot-conf/releases/latest>
+2. Download the archive for your platform:
+   - `dot-conf-x86_64-unknown-linux-gnu.tar.gz`
+   - `dot-conf-x86_64-apple-darwin.tar.gz`
+   - `dot-conf-aarch64-apple-darwin.tar.gz`
+   - `dot-conf-x86_64-pc-windows-msvc.zip`
+3. Extract and place `dot-conf` (or `dot-conf.exe`) into a directory on your `PATH`.
 
-## Usage
-
-Create a configuration file (e.g., `.conf.yaml`) and run:
+### Option 3: install with Cargo
 
 ```bash
-dot-conf .conf.yaml
-# or
-python3 -m dot_conf .conf.yaml
+cargo install --git https://github.com/ben-z/dot-conf
 ```
 
-Note that the bin directory may not already exist in path. E.g.: `$HOME/Library/Python/3.9/bin/dot-conf`.
-
-## Configuration
-
-Example configuration:
+## Quick start
 
 ```yaml
-backup_directory: ~/.dotfiles/backup
+backup_directory: ~/.config/backup
 symlinks:
-  ~/.vimrc: ~/dotfiles/vimrc
-  ~/.gitconfig: ~/dotfiles/gitconfig
+  .vimrc: ~/.vimrc
+  .tmux.conf:
+    - ~/.tmux.conf
+    - ~/.config/tmux/tmux.conf
+sys_symlinks:
+  .sysrc: /etc/sysrc
 ```
+
+Then run:
+
+```bash
+dot-conf config.yaml
+```
+
+Options:
+
+- `--user-only` only apply `symlinks`
+- `--sys-only` only apply `sys_symlinks`
+
+## Behavior notes
+
+- Source paths and relative `backup_directory` paths are resolved relative to the YAML file.
+- Relative destination paths are resolved relative to the current working directory.
+- Destination and backup paths support `~` expansion for the current user's home directory.
+- Missing source files are skipped with a warning.
+- Backup directories are created lazily only when an existing destination is backed up.
+- Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
+
+## CI and release process
+
+- Pull requests and pushes to `master` run dependency audit, formatting, clippy, and tests on Linux/macOS/Windows.
+- Pull requests and pushes to `master` also build release binaries and upload them as workflow artifacts.
+- Creating a tag like `v0.2.0` triggers release automation that builds per-platform archives and publishes them to GitHub Releases.
 
 ## Development
 
-Run tests:
-
 ```bash
-python -m unittest discover -s tests -p '*_test.py'
-```
-
-## Troubleshooting
-
-If installation produces a package named `UNKNOWN` or the `dot-conf` command is missing, this usually means your version of pip or setuptools is too old and does not respect `pyproject.toml` builds.
-
-To check your setuptools version, run:
-```bash
-python3 -m pip show setuptools
-```
-Setuptools must be at least version 61.0, and pip should be modern (version 23 or later).
-
-To upgrade pip and setuptools to appropriate versions, run:
-```bash
-python3 -m pip install "setuptools>=61" "pip>=23" wheel
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
 ## License
 
-MIT
-
+GPL-3.0-only. See [LICENSE](LICENSE).

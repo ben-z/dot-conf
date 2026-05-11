@@ -680,10 +680,17 @@ fn sticky_directory_allows_replacement(
     destination_uid: u32,
     euid: u32,
 ) -> bool {
-    parent_mode & libc::S_ISVTX as u32 == 0
-        || euid == 0
-        || destination_uid == euid
-        || parent_uid == euid
+    parent_mode & sticky_bit() == 0 || euid == 0 || destination_uid == euid || parent_uid == euid
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sticky_bit() -> u32 {
+    libc::S_ISVTX
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn sticky_bit() -> u32 {
+    libc::S_ISVTX as u32
 }
 
 #[cfg(not(unix))]
@@ -908,7 +915,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sticky_directory_replacement_requires_entry_or_directory_owner() {
-        let sticky_mode = libc::S_ISVTX as u32 | 0o777;
+        let sticky_mode = sticky_bit() | 0o777;
 
         assert!(!sticky_directory_allows_replacement(
             sticky_mode,

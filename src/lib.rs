@@ -474,7 +474,8 @@ fn preview_destination(
 
     if metadata.file_type().is_symlink() {
         let target = symlink_backup_target(destination)?;
-        if let Some(problem) = validate_replacement_paths(backup_directory, destination) {
+        if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
+        {
             return Ok(problem.into_preview_state(scope, options));
         }
         return Ok(LinkPreviewState::ReplaceSymlink {
@@ -484,7 +485,8 @@ fn preview_destination(
     }
 
     if metadata.is_file() {
-        if let Some(problem) = validate_replacement_paths(backup_directory, destination) {
+        if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
+        {
             return Ok(problem.into_preview_state(scope, options));
         }
         return Ok(LinkPreviewState::ReplaceFile {
@@ -542,6 +544,7 @@ fn validate_destination_parent(destination: &Path) -> Option<PreviewProblem> {
 fn validate_replacement_paths(
     backup_directory: &Path,
     destination: &Path,
+    destination_metadata: &fs::Metadata,
 ) -> Option<PreviewProblem> {
     if let Some(problem) = validate_directory_creatable(backup_directory) {
         return Some(PreviewProblem {
@@ -550,17 +553,25 @@ fn validate_replacement_paths(
         });
     }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    validate_existing_directory_writable(parent).map(|problem| PreviewProblem {
-        reason: format!("destination parent: {}", problem.reason),
-        elevation_may_fix: problem.elevation_may_fix,
-    })
+    if let Some(problem) = validate_existing_directory_writable(parent) {
+        return Some(PreviewProblem {
+            reason: format!("destination parent: {}", problem.reason),
+            elevation_may_fix: problem.elevation_may_fix,
+        });
+    }
+    validate_sticky_directory_replacement(parent, destination, destination_metadata).map(
+        |problem| PreviewProblem {
+            reason: format!("destination parent: {}", problem.reason),
+            elevation_may_fix: problem.elevation_may_fix,
+        },
+    )
 }
 
 fn validate_directory_creatable(path: &Path) -> Option<PreviewProblem> {
     let mut candidate = path;
 
     loop {
-        match fs::symlink_metadata(candidate) {
+        match fs::metadata(candidate) {
             Ok(metadata) => {
                 if !metadata.is_dir() {
                     return Some(PreviewProblem::blocked(format!(
@@ -571,6 +582,27 @@ fn validate_directory_creatable(path: &Path) -> Option<PreviewProblem> {
                 return validate_existing_directory_writable(candidate);
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(candidate) {
+                    Ok(_) => {
+                        return Some(PreviewProblem::blocked(format!(
+                            "{} exists and is not a directory",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                        return Some(PreviewProblem::permission_denied(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) => {
+                        return Some(PreviewProblem::blocked(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                }
                 let Some(parent) = candidate.parent() else {
                     return Some(PreviewProblem::blocked(format!(
                         "failed finding existing parent for {}",
@@ -601,6 +633,68 @@ fn validate_directory_creatable(path: &Path) -> Option<PreviewProblem> {
     }
 }
 
+#[cfg(unix)]
+fn validate_sticky_directory_replacement(
+    parent: &Path,
+    destination: &Path,
+    destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    let parent_metadata = match fs::metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            return Some(PreviewProblem::permission_denied(format!(
+                "failed inspecting {}: {err}",
+                parent.display()
+            )));
+        }
+        Err(err) => {
+            return Some(PreviewProblem::blocked(format!(
+                "failed inspecting {}: {err}",
+                parent.display()
+            )));
+        }
+    };
+    let euid = unsafe { libc::geteuid() };
+    if sticky_directory_allows_replacement(
+        parent_metadata.mode(),
+        parent_metadata.uid(),
+        destination_metadata.uid(),
+        euid,
+    ) {
+        return None;
+    }
+
+    Some(PreviewProblem::permission_denied(format!(
+        "{} is sticky and the current user does not own {}",
+        parent.display(),
+        destination.display()
+    )))
+}
+
+#[cfg(unix)]
+fn sticky_directory_allows_replacement(
+    parent_mode: u32,
+    parent_uid: u32,
+    destination_uid: u32,
+    euid: u32,
+) -> bool {
+    parent_mode & libc::S_ISVTX as u32 == 0
+        || euid == 0
+        || destination_uid == euid
+        || parent_uid == euid
+}
+
+#[cfg(not(unix))]
+fn validate_sticky_directory_replacement(
+    _parent: &Path,
+    _destination: &Path,
+    _destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    None
+}
+
 fn validate_existing_directory_writable(path: &Path) -> Option<PreviewProblem> {
     if directory_is_writable(path) {
         None
@@ -620,7 +714,7 @@ fn directory_is_writable(path: &Path) -> bool {
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
-    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
 }
 
 #[cfg(not(unix))]
@@ -809,6 +903,38 @@ mod tests {
         );
 
         assert!(matches!(state, LinkPreviewState::NeedsElevation { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sticky_directory_replacement_requires_entry_or_directory_owner() {
+        let sticky_mode = libc::S_ISVTX as u32 | 0o777;
+
+        assert!(!sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1002
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1001
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1000
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            0
+        ));
+        assert!(sticky_directory_allows_replacement(0o777, 1000, 1001, 1002));
     }
 
     #[cfg(windows)]

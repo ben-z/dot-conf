@@ -559,6 +559,13 @@ fn validate_replacement_paths(
             elevation_may_fix: problem.elevation_may_fix,
         });
     }
+    if let Some(problem) = validate_cross_device_file_backup_readable(
+        backup_directory,
+        destination,
+        destination_metadata,
+    ) {
+        return Some(problem);
+    }
     validate_sticky_directory_replacement(parent, destination, destination_metadata).map(
         |problem| PreviewProblem {
             reason: format!("destination parent: {}", problem.reason),
@@ -702,6 +709,124 @@ fn validate_sticky_directory_replacement(
     None
 }
 
+#[cfg(unix)]
+fn validate_cross_device_file_backup_readable(
+    backup_directory: &Path,
+    destination: &Path,
+    destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !destination_metadata.is_file() {
+        return None;
+    }
+
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let destination_parent_metadata = match fs::metadata(destination_parent) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            return Some(PreviewProblem::permission_denied(format!(
+                "destination parent: failed inspecting {}: {err}",
+                destination_parent.display()
+            )));
+        }
+        Err(err) => {
+            return Some(PreviewProblem::blocked(format!(
+                "destination parent: failed inspecting {}: {err}",
+                destination_parent.display()
+            )));
+        }
+    };
+    let backup_device = match creatable_directory_device(backup_directory) {
+        Ok(device) => device,
+        Err(problem) => {
+            return Some(PreviewProblem {
+                reason: format!("backup directory: {}", problem.reason),
+                elevation_may_fix: problem.elevation_may_fix,
+            });
+        }
+    };
+
+    if destination_parent_metadata.dev() != backup_device && !file_is_readable(destination) {
+        return Some(PreviewProblem::permission_denied(format!(
+            "{} is not readable; cross-device backups may need to copy it",
+            destination.display()
+        )));
+    }
+
+    None
+}
+
+#[cfg(not(unix))]
+fn validate_cross_device_file_backup_readable(
+    _backup_directory: &Path,
+    _destination: &Path,
+    _destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    None
+}
+
+#[cfg(unix)]
+fn creatable_directory_device(path: &Path) -> std::result::Result<u64, PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut candidate = path;
+
+    loop {
+        match fs::metadata(candidate) {
+            Ok(metadata) => return Ok(metadata.dev()),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(candidate) {
+                    Ok(_) => {
+                        return Err(PreviewProblem::blocked(format!(
+                            "{} exists and is not a directory",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                        return Err(PreviewProblem::permission_denied(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) => {
+                        return Err(PreviewProblem::blocked(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                }
+                let Some(parent) = candidate.parent() else {
+                    return Err(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                };
+                if parent == candidate {
+                    return Err(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                }
+                candidate = parent;
+            }
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                return Err(PreviewProblem::permission_denied(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+            Err(err) => {
+                return Err(PreviewProblem::blocked(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+}
+
 fn validate_existing_directory_writable(path: &Path) -> Option<PreviewProblem> {
     if directory_is_writable(path) {
         None
@@ -715,13 +840,23 @@ fn validate_existing_directory_writable(path: &Path) -> Option<PreviewProblem> {
 
 #[cfg(unix)]
 fn directory_is_writable(path: &Path) -> bool {
+    path_has_access(path, libc::W_OK | libc::X_OK)
+}
+
+#[cfg(unix)]
+fn file_is_readable(path: &Path) -> bool {
+    path_has_access(path, libc::R_OK)
+}
+
+#[cfg(unix)]
+fn path_has_access(path: &Path, mode: libc::c_int) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
-    unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+    unsafe { libc::access(path.as_ptr(), mode) == 0 }
 }
 
 #[cfg(not(unix))]

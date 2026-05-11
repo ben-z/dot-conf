@@ -262,6 +262,10 @@ fn dry_run_accepts_symlinked_backup_directory() {
 fn dry_run_fails_when_backup_directory_lacks_search_permission() {
     use std::os::unix::fs::PermissionsExt;
 
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     let home = root.join("home");

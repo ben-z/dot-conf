@@ -77,7 +77,7 @@ symlinks:
       - lab-workstation
 ```
 
-`dot-conf` reads the current hostname from the operating system and compares configured hosts case-insensitively against both the full hostname and the short name before the first dot. For example, a machine named `work-laptop.example.com` matches either `work-laptop.example.com` or `work-laptop`.
+`dot-conf` reads the current hostname from the operating system and compares configured hosts case-insensitively. A short configured host such as `work-laptop` matches either `work-laptop` or a full current hostname such as `work-laptop.example.com`. A configured fully-qualified host such as `work-laptop.example.com` requires the operating system to report that exact full hostname, which avoids guessing when two domains share the same short host name.
 
 ## Behavior notes
 

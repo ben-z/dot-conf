@@ -144,3 +144,74 @@ backup_dir: ~/.config/misspelled
     assert!(stderr.contains("unknown field"));
     assert!(!home.join(".vimrc").exists());
 }
+
+#[test]
+#[serial]
+fn dry_run_fails_when_create_destination_parent_is_invalid() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    write_file(&cfg_dir.join(".vimrc"), "new");
+    write_file(&home.join("blocked"), "not a directory");
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            "backup_directory: ~/.config/backup\nsymlinks:\n  .vimrc: {}\n",
+            home.join("blocked/.vimrc").display()
+        ),
+    )
+    .unwrap();
+
+    let output = dot_conf_with_home(&home)
+        .arg("--dry-run")
+        .arg(&yaml)
+        .output()
+        .unwrap();
+
+    assert_failure(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[user] blocked"));
+    assert!(stdout.contains("destination parent:"));
+    assert!(!home.join(".config/backup").exists());
+}
+
+#[test]
+#[serial]
+fn dry_run_fails_when_backup_directory_is_invalid() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    write_file(&cfg_dir.join(".vimrc"), "new");
+    write_file(&home.join(".vimrc"), "old");
+    write_file(&home.join("blocked"), "not a directory");
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            "backup_directory: {}\nsymlinks:\n  .vimrc: ~/.vimrc\n",
+            home.join("blocked/backup").display()
+        ),
+    )
+    .unwrap();
+
+    let output = dot_conf_with_home(&home)
+        .arg("--dry-run")
+        .arg(&yaml)
+        .output()
+        .unwrap();
+
+    assert_failure(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[user] blocked"));
+    assert!(stdout.contains("backup directory:"));
+    assert_eq!(fs::read_to_string(home.join(".vimrc")).unwrap(), "old");
+}

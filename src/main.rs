@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
-use dot_conf::{DotConf, LinkPreview, LinkPreviewState, LinkScope, Scope};
+use dot_conf::{DotConf, LinkPreview, LinkPreviewState, LinkScope, PreviewOptions, Scope};
 use log::LevelFilter;
 #[cfg(unix)]
 use std::env;
@@ -182,7 +182,8 @@ fn apply_scope(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
 
 fn print_dry_run(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
     println!("Dry run: no files will be changed.");
-    if scope == Scope::All && configs.iter().any(|config| config.config.requires_root()) {
+    let preview_options = preview_options(configs, scope);
+    if preview_options.system_links_may_use_elevation {
         if is_elevated() {
             println!("System links would be applied before user links.");
         } else {
@@ -196,7 +197,7 @@ fn print_dry_run(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
     for named in configs {
         let previews = named
             .config
-            .preview(scope)
+            .preview_with_options(scope, preview_options)
             .with_context(|| format!("previewing {}", named.filename.display()))?;
         println!();
         println!("{}:", named.filename.display());
@@ -247,6 +248,17 @@ fn print_preview(preview: &LinkPreview) {
         LinkPreviewState::Blocked { reason } => {
             println!("  [{scope}] blocked {destination} -> {source} ({reason})");
         }
+        LinkPreviewState::NeedsElevation { reason } => {
+            println!("  [{scope}] needs elevated validation {destination} -> {source} ({reason})");
+        }
+    }
+}
+
+fn preview_options(configs: &[NamedConfig], scope: Scope) -> PreviewOptions {
+    PreviewOptions {
+        system_links_may_use_elevation: scope == Scope::All
+            && !is_elevated()
+            && configs.iter().any(|config| config.config.requires_root()),
     }
 }
 

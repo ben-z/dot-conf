@@ -56,7 +56,7 @@ dot-conf config.yaml
 
 Options:
 
-- `--dry-run` preview resolved changes without modifying files or invoking `sudo`
+- `--dry-run` preview resolved changes and path blockers without modifying files or invoking `sudo`
 - `--scope all|user|system` choose which config section(s) to apply
 - `--user-only` only apply `symlinks` (alias for `--scope user`)
 - `--sys-only` only apply `sys_symlinks` (alias for `--scope system`)
@@ -71,6 +71,7 @@ Options:
 - Backup directories are created lazily only when an existing destination is backed up.
 - Config files are all parsed before any changes are applied.
 - When applying both user and system links from a non-root shell, system links are applied with `sudo` first; user links are applied only after that succeeds.
+- Dry runs validate obvious destination and backup-directory blockers. System links that need `sudo` may be reported as needing elevated validation instead of hard-failing from a non-root preview.
 - Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
 
 ## CI and release process

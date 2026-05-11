@@ -64,6 +64,21 @@ Options:
 - `--user-only` only apply `symlinks`
 - `--sys-only` only apply `sys_symlinks`
 
+## Host matching
+
+Use your system hostname in a `host` or `hosts` filter when a link should only apply on some machines. On most systems, `hostname` prints the full name and `hostname -s` prints the short name.
+
+```yaml
+symlinks:
+  jupyter_notebook_config.py:
+    destinations: ~/.jupyter/jupyter_notebook_config.py
+    hosts:
+      - work-laptop
+      - lab-workstation
+```
+
+`dot-conf` reads the current hostname from the operating system and compares configured hosts case-insensitively against both the full hostname and the short name before the first dot. For example, a machine named `work-laptop.example.com` matches either `work-laptop.example.com` or `work-laptop`.
+
 ## Behavior notes
 
 - Source paths and relative `backup_directory` paths are resolved relative to the YAML file.

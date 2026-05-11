@@ -56,8 +56,11 @@ dot-conf config.yaml
 
 Options:
 
-- `--user-only` only apply `symlinks`
-- `--sys-only` only apply `sys_symlinks`
+- `--dry-run` preview resolved changes without modifying files or invoking `sudo`
+- `--scope all|user|system` choose which config section(s) to apply
+- `--user-only` only apply `symlinks` (alias for `--scope user`)
+- `--sys-only` only apply `sys_symlinks` (alias for `--scope system`)
+- `-v`, `-vv` increase log verbosity; `-q`, `-qq` reduce it
 
 ## Behavior notes
 
@@ -66,6 +69,8 @@ Options:
 - Destination and backup paths support `~` expansion for the current user's home directory.
 - Missing source files are skipped with a warning.
 - Backup directories are created lazily only when an existing destination is backed up.
+- Config files are all parsed before any changes are applied.
+- When applying both user and system links from a non-root shell, system links are applied with `sudo` first; user links are applied only after that succeeds.
 - Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
 
 ## CI and release process

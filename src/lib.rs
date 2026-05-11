@@ -27,6 +27,54 @@ pub enum Scope {
     Sys,
 }
 
+/// Which section a link came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkScope {
+    /// A link from the `symlinks` section.
+    User,
+    /// A link from the `sys_symlinks` section.
+    System,
+}
+
+/// A non-mutating preview of a configured link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkPreview {
+    /// Whether the link came from `symlinks` or `sys_symlinks`.
+    pub scope: LinkScope,
+    /// The resolved source path.
+    pub source: PathBuf,
+    /// The resolved destination path.
+    pub destination: PathBuf,
+    /// What applying this link would do.
+    pub state: LinkPreviewState,
+}
+
+/// The result of inspecting one configured link without applying it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkPreviewState {
+    /// The source path is missing, so the link would be skipped.
+    MissingSource,
+    /// The destination is absent, so a new symlink would be created.
+    Create,
+    /// The destination is a file and would be backed up before replacement.
+    ReplaceFile {
+        /// The directory where the existing file would be backed up.
+        backup_directory: PathBuf,
+    },
+    /// The destination is a symlink and would be backed up before replacement.
+    ReplaceSymlink {
+        /// The directory where the existing symlink would be backed up.
+        backup_directory: PathBuf,
+        /// The resolved target of the existing symlink.
+        target: PathBuf,
+    },
+    /// The destination exists but cannot be replaced by this tool.
+    Blocked {
+        /// A human-readable reason the link cannot be applied.
+        reason: String,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -102,6 +150,22 @@ impl DotConf {
         !self.sys_symlinks.is_empty()
     }
 
+    /// Inspect what applying the requested scope would do without changing files.
+    pub fn preview(&self, scope: Scope) -> Result<Vec<LinkPreview>> {
+        let mut previews = Vec::new();
+        match scope {
+            Scope::All => {
+                self.preview_links(LinkScope::System, &self.sys_symlinks, &mut previews)?;
+                self.preview_links(LinkScope::User, &self.symlinks, &mut previews)?;
+            }
+            Scope::User => self.preview_links(LinkScope::User, &self.symlinks, &mut previews)?,
+            Scope::Sys => {
+                self.preview_links(LinkScope::System, &self.sys_symlinks, &mut previews)?
+            }
+        }
+        Ok(previews)
+    }
+
     /// Apply configured symlinks for the requested scope.
     ///
     /// Existing file and symlink destinations are backed up before they are
@@ -139,6 +203,39 @@ impl DotConf {
                 }
                 backup_and_remove_if_exists(&self.backup_directory, destination)?;
                 create_symlink(source, destination)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn preview_links(
+        &self,
+        scope: LinkScope,
+        links: &BTreeMap<PathBuf, Vec<PathBuf>>,
+        previews: &mut Vec<LinkPreview>,
+    ) -> Result<()> {
+        for (source, destinations) in links {
+            let source_exists = match fs::metadata(source) {
+                Ok(_) => true,
+                Err(err) if err.kind() == ErrorKind::NotFound => false,
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed inspecting {}", source.display()));
+                }
+            };
+
+            for destination in destinations {
+                let state = if source_exists {
+                    preview_destination(&self.backup_directory, destination)?
+                } else {
+                    LinkPreviewState::MissingSource
+                };
+                previews.push(LinkPreview {
+                    scope,
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    state,
+                });
             }
         }
         Ok(())
@@ -287,6 +384,36 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
         "destination {} exists and is not a file/symlink",
         destination.display()
     )
+}
+
+fn preview_destination(backup_directory: &Path, destination: &Path) -> Result<LinkPreviewState> {
+    let metadata = match fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(LinkPreviewState::Create),
+        Err(err) => {
+            return Ok(LinkPreviewState::Blocked {
+                reason: format!("failed inspecting {}: {err}", destination.display()),
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        let target = symlink_backup_target(destination)?;
+        return Ok(LinkPreviewState::ReplaceSymlink {
+            backup_directory: backup_directory.to_path_buf(),
+            target,
+        });
+    }
+
+    if metadata.is_file() {
+        return Ok(LinkPreviewState::ReplaceFile {
+            backup_directory: backup_directory.to_path_buf(),
+        });
+    }
+
+    Ok(LinkPreviewState::Blocked {
+        reason: "destination exists and is not a file/symlink".to_string(),
+    })
 }
 
 fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<PathBuf> {

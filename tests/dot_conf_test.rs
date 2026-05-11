@@ -23,15 +23,24 @@ fn with_home<R>(path: &Path, test: impl FnOnce() -> R) -> R {
     temp_env::with_vars(vars, test)
 }
 
-fn with_home_and_hostname<R>(path: &Path, hostname: &str, test: impl FnOnce() -> R) -> R {
-    let vars: [(&str, Option<&OsStr>); 5] = [
-        ("HOME", Some(path.as_os_str())),
-        ("USERPROFILE", Some(path.as_os_str())),
-        ("HOMEDRIVE", None),
-        ("HOMEPATH", None),
-        ("DOT_CONF_HOSTNAME", Some(OsStr::new(hostname))),
-    ];
-    temp_env::with_vars(vars, test)
+fn current_test_hostname() -> String {
+    hostname::get().unwrap().into_string().unwrap()
+}
+
+fn short_hostname(hostname: &str) -> &str {
+    hostname
+        .split_once('.')
+        .map_or(hostname, |(short, _)| short)
+}
+
+fn non_matching_hostname(hostname: &str) -> String {
+    let short = short_hostname(hostname);
+    let candidate = "dot-conf-unmatched-host";
+    if candidate.eq_ignore_ascii_case(hostname) || candidate.eq_ignore_ascii_case(short) {
+        "dot-conf-unmatched-host-2".to_string()
+    } else {
+        candidate.to_string()
+    }
 }
 
 #[cfg(unix)]
@@ -168,7 +177,10 @@ fn applies_matching_host_links_only() {
     let cfg_dir = root.join("cfg");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&cfg_dir).unwrap();
-    with_home_and_hostname(&home, "workstation.example.test", || {
+    with_home(&home, || {
+        let hostname = current_test_hostname();
+        let matching_host = short_hostname(&hostname);
+        let non_matching_host = non_matching_hostname(&hostname);
         write_file(&cfg_dir.join("always"), "always");
         write_file(&cfg_dir.join("work"), "work");
         write_file(&cfg_dir.join("personal"), "personal");
@@ -176,19 +188,20 @@ fn applies_matching_host_links_only() {
         let yaml = cfg_dir.join("config.yaml");
         fs::write(
             &yaml,
-            r#"backup_directory: ~/.config/backup
+            format!(
+                r#"backup_directory: ~/.config/backup
 symlinks:
   always: ~/always
   work:
     destinations: ~/work
-    host: workstation
+    host: {matching_host}
   personal:
     destinations:
       - ~/personal
     hosts:
-      - personal-laptop
-      - travel-laptop
-"#,
+      - {non_matching_host}
+"#
+            ),
         )
         .unwrap();
 

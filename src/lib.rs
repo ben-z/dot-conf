@@ -105,8 +105,14 @@ impl RawLink {
 #[derive(Debug)]
 pub struct DotConf {
     backup_directory: PathBuf,
-    symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
-    sys_symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
+    symlinks: BTreeMap<PathBuf, LinkConfig>,
+    sys_symlinks: BTreeMap<PathBuf, LinkConfig>,
+}
+
+#[derive(Debug)]
+struct LinkConfig {
+    destinations: Vec<PathBuf>,
+    hosts: Vec<String>,
 }
 
 impl DotConf {
@@ -137,22 +143,11 @@ impl DotConf {
     /// current directory.
     pub fn from_yaml_str(yaml: &str, source_base: &Path, destination_base: &Path) -> Result<Self> {
         let raw: RawConfig = serde_yml::from_str(yaml).context("failed parsing YAML")?;
-        let mut current_host = None;
         Ok(Self {
             backup_directory: resolve_against(source_base, &raw.backup_directory)
                 .with_context(|| format!("failed resolving {}", raw.backup_directory.display()))?,
-            symlinks: normalize_links(
-                source_base,
-                destination_base,
-                raw.symlinks,
-                &mut current_host,
-            )?,
-            sys_symlinks: normalize_links(
-                source_base,
-                destination_base,
-                raw.sys_symlinks,
-                &mut current_host,
-            )?,
+            symlinks: normalize_links(source_base, destination_base, raw.symlinks)?,
+            sys_symlinks: normalize_links(source_base, destination_base, raw.sys_symlinks)?,
         })
     }
 
@@ -166,19 +161,34 @@ impl DotConf {
     /// Existing file and symlink destinations are backed up before they are
     /// replaced. Missing source files are skipped with a warning.
     pub fn apply(&self, scope: Scope) -> Result<()> {
+        let mut current_host = None;
         match scope {
             Scope::All => {
-                self.apply_links(&self.sys_symlinks)?;
-                self.apply_links(&self.symlinks)?;
+                self.apply_links(&self.sys_symlinks, &mut current_host)?;
+                self.apply_links(&self.symlinks, &mut current_host)?;
             }
-            Scope::User => self.apply_links(&self.symlinks)?,
-            Scope::Sys => self.apply_links(&self.sys_symlinks)?,
+            Scope::User => self.apply_links(&self.symlinks, &mut current_host)?,
+            Scope::Sys => self.apply_links(&self.sys_symlinks, &mut current_host)?,
         }
         Ok(())
     }
 
-    fn apply_links(&self, links: &BTreeMap<PathBuf, Vec<PathBuf>>) -> Result<()> {
-        for (source, destinations) in links {
+    fn apply_links(
+        &self,
+        links: &BTreeMap<PathBuf, LinkConfig>,
+        current_host: &mut Option<String>,
+    ) -> Result<()> {
+        for (source, link) in links {
+            if !link.hosts.is_empty() {
+                if current_host.is_none() {
+                    *current_host = Some(current_hostname()?);
+                }
+                let hostname = current_host.as_deref().expect("hostname was initialized");
+                if !host_matches(&link.hosts, hostname) {
+                    continue;
+                }
+            }
+
             match fs::metadata(source) {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -191,7 +201,7 @@ impl DotConf {
                 }
             };
 
-            for destination in destinations {
+            for destination in &link.destinations {
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed creating {}", parent.display()))?;
@@ -208,21 +218,10 @@ fn normalize_links(
     source_base: &Path,
     destination_base: &Path,
     links: BTreeMap<PathBuf, RawLink>,
-    current_host: &mut Option<String>,
-) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>> {
+) -> Result<BTreeMap<PathBuf, LinkConfig>> {
     let mut normalized = BTreeMap::new();
     for (source, raw_link) in links {
         let (destinations, hosts) = raw_link.into_parts();
-        if !hosts.is_empty() {
-            if current_host.is_none() {
-                *current_host = Some(current_hostname()?);
-            }
-            let hostname = current_host.as_deref().expect("hostname was initialized");
-            if !host_matches(&hosts, hostname) {
-                continue;
-            }
-        }
-
         let resolved_source = resolve_against(source_base, &source)
             .with_context(|| format!("failed resolving source {}", source.display()))?;
         let resolved_destinations = destinations
@@ -234,16 +233,18 @@ fn normalize_links(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        normalized.insert(resolved_source, resolved_destinations);
+        normalized.insert(
+            resolved_source,
+            LinkConfig {
+                destinations: resolved_destinations,
+                hosts,
+            },
+        );
     }
     Ok(normalized)
 }
 
 fn current_hostname() -> Result<String> {
-    if let Ok(hostname) = std::env::var("DOT_CONF_HOSTNAME") {
-        return Ok(hostname);
-    }
-
     hostname::get()
         .context("failed reading hostname")?
         .into_string()
@@ -256,13 +257,20 @@ fn current_hostname() -> Result<String> {
 }
 
 fn host_matches(hosts: &[String], current_host: &str) -> bool {
-    let current_short = current_host
-        .split_once('.')
-        .map_or(current_host, |(short, _)| short);
+    let (current_short, current_is_fqdn) = hostname_parts(current_host);
 
     hosts.iter().any(|host| {
-        host.eq_ignore_ascii_case(current_host) || host.eq_ignore_ascii_case(current_short)
+        let (host_short, host_is_fqdn) = hostname_parts(host);
+        host.eq_ignore_ascii_case(current_host)
+            || (!host_is_fqdn && host.eq_ignore_ascii_case(current_short))
+            || (!current_is_fqdn && host_short.eq_ignore_ascii_case(current_host))
     })
+}
+
+fn hostname_parts(hostname: &str) -> (&str, bool) {
+    hostname
+        .split_once('.')
+        .map_or((hostname, false), |(short, _)| (short, true))
 }
 
 fn resolve_from_cwd(path: &Path) -> Result<PathBuf> {
@@ -543,6 +551,26 @@ mod tests {
         let expanded = expand_tilde_with_home(&path, Some(Path::new("/tmp/home"))).unwrap();
 
         assert_eq!(expanded.as_os_str().as_bytes(), b"/tmp/home/foo\xffbar");
+    }
+
+    #[test]
+    fn host_matching_accepts_short_and_full_names() {
+        assert!(host_matches(
+            &[String::from("workstation")],
+            "workstation.example.test"
+        ));
+        assert!(host_matches(
+            &[String::from("workstation.example.test")],
+            "workstation"
+        ));
+        assert!(host_matches(
+            &[String::from("WORKSTATION")],
+            "workstation.example.test"
+        ));
+        assert!(!host_matches(
+            &[String::from("workstation.other.test")],
+            "workstation.example.test"
+        ));
     }
 
     #[cfg(windows)]

@@ -23,6 +23,17 @@ fn with_home<R>(path: &Path, test: impl FnOnce() -> R) -> R {
     temp_env::with_vars(vars, test)
 }
 
+fn with_home_and_hostname<R>(path: &Path, hostname: &str, test: impl FnOnce() -> R) -> R {
+    let vars: [(&str, Option<&OsStr>); 5] = [
+        ("HOME", Some(path.as_os_str())),
+        ("USERPROFILE", Some(path.as_os_str())),
+        ("HOMEDRIVE", None),
+        ("HOMEPATH", None),
+        ("DOT_CONF_HOSTNAME", Some(OsStr::new(hostname))),
+    ];
+    temp_env::with_vars(vars, test)
+}
+
 #[cfg(unix)]
 fn create_file_symlink(source: &Path, destination: &Path) {
     std::os::unix::fs::symlink(source, destination).unwrap();
@@ -138,6 +149,57 @@ symlinks:
             .collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
+
+        let backup_name = backups[0].file_name().unwrap().to_string_lossy();
+        assert!(backup_name.starts_with(".vimrc."));
+        assert!(backup_name.ends_with(".bak"));
+        assert!(backup_name.contains('T'));
+        assert!(backup_name.contains("Z."));
+        assert!(!backup_name.contains(':'));
+    });
+}
+
+#[test]
+#[serial]
+fn applies_matching_host_links_only() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home_and_hostname(&home, "workstation.example.test", || {
+        write_file(&cfg_dir.join("always"), "always");
+        write_file(&cfg_dir.join("work"), "work");
+        write_file(&cfg_dir.join("personal"), "personal");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  always: ~/always
+  work:
+    destinations: ~/work
+    host: workstation
+  personal:
+    destinations:
+      - ~/personal
+    hosts:
+      - personal-laptop
+      - travel-laptop
+"#,
+        )
+        .unwrap();
+
+        DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        assert!(home.join("always").is_symlink());
+        assert!(home.join("work").is_symlink());
+        assert!(!home.join("personal").exists());
     });
 }
 

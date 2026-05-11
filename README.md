@@ -44,6 +44,11 @@ symlinks:
   .tmux.conf:
     - ~/.tmux.conf
     - ~/.config/tmux/tmux.conf
+  jupyter_notebook_config.py:
+    destinations: ~/.jupyter/jupyter_notebook_config.py
+    hosts:
+      - work-laptop
+      - lab-workstation
 sys_symlinks:
   .sysrc: /etc/sysrc
 ```
@@ -64,8 +69,10 @@ Options:
 - Source paths and relative `backup_directory` paths are resolved relative to the YAML file.
 - Relative destination paths are resolved relative to the current working directory.
 - Destination and backup paths support `~` expansion for the current user's home directory.
+- A symlink entry can use `destinations` plus `host` or `hosts` to apply only on matching hostnames.
 - Missing source files are skipped with a warning.
 - Backup directories are created lazily only when an existing destination is backed up.
+- Backup filenames include the destination name, a readable UTC timestamp, and a destination hash.
 - Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
 
 ## CI and release process

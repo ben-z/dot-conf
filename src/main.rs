@@ -18,8 +18,8 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
     let cli = Cli::parse();
+    env_logger::init();
     let mut system_config_filenames = Vec::new();
 
     for filename in &cli.filenames {

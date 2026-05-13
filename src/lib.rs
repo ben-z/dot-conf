@@ -28,6 +28,67 @@ pub enum Scope {
     Sys,
 }
 
+/// Which section a link came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkScope {
+    /// A link from the `symlinks` section.
+    User,
+    /// A link from the `sys_symlinks` section.
+    System,
+}
+
+/// A non-mutating preview of a configured link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkPreview {
+    /// Whether the link came from `symlinks` or `sys_symlinks`.
+    pub scope: LinkScope,
+    /// The resolved source path.
+    pub source: PathBuf,
+    /// The resolved destination path.
+    pub destination: PathBuf,
+    /// What applying this link would do.
+    pub state: LinkPreviewState,
+}
+
+/// The result of inspecting one configured link without applying it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkPreviewState {
+    /// The source path is missing, so the link would be skipped.
+    MissingSource,
+    /// The destination is absent, so a new symlink would be created.
+    Create,
+    /// The destination is a file and would be backed up before replacement.
+    ReplaceFile {
+        /// The directory where the existing file would be backed up.
+        backup_directory: PathBuf,
+    },
+    /// The destination is a symlink and would be backed up before replacement.
+    ReplaceSymlink {
+        /// The directory where the existing symlink would be backed up.
+        backup_directory: PathBuf,
+        /// The resolved target of the existing symlink.
+        target: PathBuf,
+    },
+    /// The destination exists but cannot be replaced by this tool.
+    Blocked {
+        /// A human-readable reason the link cannot be applied.
+        reason: String,
+    },
+    /// The link needs elevated privileges before it can be fully validated.
+    NeedsElevation {
+        /// A human-readable reason elevated validation is needed.
+        reason: String,
+    },
+}
+
+/// Options controlling how non-mutating previews inspect links.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PreviewOptions {
+    /// Treat permission-denied system-link probes as needing elevated
+    /// validation instead of hard blockers.
+    pub system_links_may_use_elevation: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -156,6 +217,54 @@ impl DotConf {
         !self.sys_symlinks.is_empty()
     }
 
+    /// Inspect what applying the requested scope would do without changing files.
+    pub fn preview(&self, scope: Scope) -> Result<Vec<LinkPreview>> {
+        self.preview_with_options(scope, PreviewOptions::default())
+    }
+
+    /// Inspect what applying the requested scope would do using preview options.
+    pub fn preview_with_options(
+        &self,
+        scope: Scope,
+        options: PreviewOptions,
+    ) -> Result<Vec<LinkPreview>> {
+        let mut previews = Vec::new();
+        let mut current_host = None;
+        match scope {
+            Scope::All => {
+                self.preview_links(
+                    LinkScope::System,
+                    &self.sys_symlinks,
+                    &mut previews,
+                    options,
+                    &mut current_host,
+                )?;
+                self.preview_links(
+                    LinkScope::User,
+                    &self.symlinks,
+                    &mut previews,
+                    options,
+                    &mut current_host,
+                )?;
+            }
+            Scope::User => self.preview_links(
+                LinkScope::User,
+                &self.symlinks,
+                &mut previews,
+                options,
+                &mut current_host,
+            )?,
+            Scope::Sys => self.preview_links(
+                LinkScope::System,
+                &self.sys_symlinks,
+                &mut previews,
+                options,
+                &mut current_host,
+            )?,
+        }
+        Ok(previews)
+    }
+
     /// Apply configured symlinks for the requested scope.
     ///
     /// Existing file and symlink destinations are backed up before they are
@@ -208,6 +317,67 @@ impl DotConf {
                 }
                 backup_and_remove_if_exists(&self.backup_directory, destination)?;
                 create_symlink(source, destination)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn preview_links(
+        &self,
+        scope: LinkScope,
+        links: &BTreeMap<PathBuf, LinkConfig>,
+        previews: &mut Vec<LinkPreview>,
+        options: PreviewOptions,
+        current_host: &mut Option<String>,
+    ) -> Result<()> {
+        for (source, link) in links {
+            if !link.hosts.is_empty() {
+                if current_host.is_none() {
+                    *current_host = Some(current_hostname()?);
+                }
+                let hostname = current_host.as_deref().expect("hostname was initialized");
+                if !host_matches(&link.hosts, hostname) {
+                    continue;
+                }
+            }
+
+            let source_exists = match fs::metadata(source) {
+                Ok(_) => true,
+                Err(err) if err.kind() == ErrorKind::NotFound => false,
+                Err(err) if should_defer_to_elevation(scope, options, err.kind()) => {
+                    for destination in &link.destinations {
+                        previews.push(LinkPreview {
+                            scope,
+                            source: source.clone(),
+                            destination: destination.clone(),
+                            state: LinkPreviewState::NeedsElevation {
+                                reason: format!(
+                                    "failed inspecting source {} without elevated privileges: {err}",
+                                    source.display()
+                                ),
+                            },
+                        });
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("failed inspecting {}", source.display()));
+                }
+            };
+
+            for destination in &link.destinations {
+                let state = if source_exists {
+                    preview_destination(&self.backup_directory, destination, scope, options)?
+                } else {
+                    LinkPreviewState::MissingSource
+                };
+                previews.push(LinkPreview {
+                    scope,
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    state,
+                });
             }
         }
         Ok(())
@@ -393,6 +563,454 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
     )
 }
 
+fn preview_destination(
+    backup_directory: &Path,
+    destination: &Path,
+    scope: LinkScope,
+    options: PreviewOptions,
+) -> Result<LinkPreviewState> {
+    let metadata = match fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            if let Some(problem) = validate_destination_parent(destination) {
+                return Ok(problem.into_preview_state(scope, options));
+            }
+            return Ok(LinkPreviewState::Create);
+        }
+        Err(err) if err.kind() == ErrorKind::NotADirectory => {
+            if let Some(problem) = validate_destination_parent(destination) {
+                return Ok(problem.into_preview_state(scope, options));
+            }
+            return Ok(LinkPreviewState::Blocked {
+                reason: format!("failed inspecting {}: {err}", destination.display()),
+            });
+        }
+        Err(err) if should_defer_to_elevation(scope, options, err.kind()) => {
+            return Ok(LinkPreviewState::NeedsElevation {
+                reason: format!(
+                    "failed inspecting destination {} without elevated privileges: {err}",
+                    destination.display()
+                ),
+            });
+        }
+        Err(err) => {
+            return Ok(LinkPreviewState::Blocked {
+                reason: format!("failed inspecting {}: {err}", destination.display()),
+            });
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        let target = symlink_backup_target(destination)?;
+        if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
+        {
+            return Ok(problem.into_preview_state(scope, options));
+        }
+        return Ok(LinkPreviewState::ReplaceSymlink {
+            backup_directory: backup_directory.to_path_buf(),
+            target,
+        });
+    }
+
+    if metadata.is_file() {
+        if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
+        {
+            return Ok(problem.into_preview_state(scope, options));
+        }
+        return Ok(LinkPreviewState::ReplaceFile {
+            backup_directory: backup_directory.to_path_buf(),
+        });
+    }
+
+    Ok(LinkPreviewState::Blocked {
+        reason: "destination exists and is not a file/symlink".to_string(),
+    })
+}
+
+#[derive(Debug)]
+struct PreviewProblem {
+    reason: String,
+    elevation_may_fix: bool,
+}
+
+impl PreviewProblem {
+    fn blocked(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            elevation_may_fix: false,
+        }
+    }
+
+    fn permission_denied(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            elevation_may_fix: true,
+        }
+    }
+
+    fn into_preview_state(self, scope: LinkScope, options: PreviewOptions) -> LinkPreviewState {
+        if should_defer_problem_to_elevation(scope, options, self.elevation_may_fix) {
+            LinkPreviewState::NeedsElevation {
+                reason: self.reason,
+            }
+        } else {
+            LinkPreviewState::Blocked {
+                reason: self.reason,
+            }
+        }
+    }
+}
+
+fn validate_destination_parent(destination: &Path) -> Option<PreviewProblem> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    validate_directory_creatable(parent).map(|problem| PreviewProblem {
+        reason: format!("destination parent: {}", problem.reason),
+        elevation_may_fix: problem.elevation_may_fix,
+    })
+}
+
+fn validate_replacement_paths(
+    backup_directory: &Path,
+    destination: &Path,
+    destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    if let Some(problem) = validate_directory_creatable(backup_directory) {
+        return Some(PreviewProblem {
+            reason: format!("backup directory: {}", problem.reason),
+            elevation_may_fix: problem.elevation_may_fix,
+        });
+    }
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(problem) = validate_existing_directory_writable(parent) {
+        return Some(PreviewProblem {
+            reason: format!("destination parent: {}", problem.reason),
+            elevation_may_fix: problem.elevation_may_fix,
+        });
+    }
+    if let Some(problem) = validate_cross_device_file_backup_readable(
+        backup_directory,
+        destination,
+        destination_metadata,
+    ) {
+        return Some(problem);
+    }
+    validate_sticky_directory_replacement(parent, destination, destination_metadata).map(
+        |problem| PreviewProblem {
+            reason: format!("destination parent: {}", problem.reason),
+            elevation_may_fix: problem.elevation_may_fix,
+        },
+    )
+}
+
+fn validate_directory_creatable(path: &Path) -> Option<PreviewProblem> {
+    let mut candidate = path;
+
+    loop {
+        match fs::metadata(candidate) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Some(PreviewProblem::blocked(format!(
+                        "{} exists and is not a directory",
+                        candidate.display()
+                    )));
+                }
+                return validate_existing_directory_writable(candidate);
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(candidate) {
+                    Ok(_) => {
+                        return Some(PreviewProblem::blocked(format!(
+                            "{} exists and is not a directory",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                        return Some(PreviewProblem::permission_denied(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) => {
+                        return Some(PreviewProblem::blocked(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                }
+                let Some(parent) = candidate.parent() else {
+                    return Some(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                };
+                if parent == candidate {
+                    return Some(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                }
+                candidate = parent;
+            }
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                return Some(PreviewProblem::permission_denied(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+            Err(err) => {
+                return Some(PreviewProblem::blocked(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn validate_sticky_directory_replacement(
+    parent: &Path,
+    destination: &Path,
+    destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    let parent_metadata = match fs::metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            return Some(PreviewProblem::permission_denied(format!(
+                "failed inspecting {}: {err}",
+                parent.display()
+            )));
+        }
+        Err(err) => {
+            return Some(PreviewProblem::blocked(format!(
+                "failed inspecting {}: {err}",
+                parent.display()
+            )));
+        }
+    };
+    let euid = unsafe { libc::geteuid() };
+    if sticky_directory_allows_replacement(
+        parent_metadata.mode(),
+        parent_metadata.uid(),
+        destination_metadata.uid(),
+        euid,
+    ) {
+        return None;
+    }
+
+    Some(PreviewProblem::permission_denied(format!(
+        "{} is sticky and the current user does not own {}",
+        parent.display(),
+        destination.display()
+    )))
+}
+
+#[cfg(unix)]
+fn sticky_directory_allows_replacement(
+    parent_mode: u32,
+    parent_uid: u32,
+    destination_uid: u32,
+    euid: u32,
+) -> bool {
+    parent_mode & sticky_bit() == 0 || euid == 0 || destination_uid == euid || parent_uid == euid
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sticky_bit() -> u32 {
+    libc::S_ISVTX
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn sticky_bit() -> u32 {
+    libc::S_ISVTX as u32
+}
+
+#[cfg(not(unix))]
+fn validate_sticky_directory_replacement(
+    _parent: &Path,
+    _destination: &Path,
+    _destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    None
+}
+
+#[cfg(unix)]
+fn validate_cross_device_file_backup_readable(
+    backup_directory: &Path,
+    destination: &Path,
+    destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !destination_metadata.is_file() {
+        return None;
+    }
+
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let destination_parent_metadata = match fs::metadata(destination_parent) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            return Some(PreviewProblem::permission_denied(format!(
+                "destination parent: failed inspecting {}: {err}",
+                destination_parent.display()
+            )));
+        }
+        Err(err) => {
+            return Some(PreviewProblem::blocked(format!(
+                "destination parent: failed inspecting {}: {err}",
+                destination_parent.display()
+            )));
+        }
+    };
+    let backup_device = match creatable_directory_device(backup_directory) {
+        Ok(device) => device,
+        Err(problem) => {
+            return Some(PreviewProblem {
+                reason: format!("backup directory: {}", problem.reason),
+                elevation_may_fix: problem.elevation_may_fix,
+            });
+        }
+    };
+
+    if destination_parent_metadata.dev() != backup_device && !file_is_readable(destination) {
+        return Some(PreviewProblem::permission_denied(format!(
+            "{} is not readable; cross-device backups may need to copy it",
+            destination.display()
+        )));
+    }
+
+    None
+}
+
+#[cfg(not(unix))]
+fn validate_cross_device_file_backup_readable(
+    _backup_directory: &Path,
+    _destination: &Path,
+    _destination_metadata: &fs::Metadata,
+) -> Option<PreviewProblem> {
+    None
+}
+
+#[cfg(unix)]
+fn creatable_directory_device(path: &Path) -> std::result::Result<u64, PreviewProblem> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut candidate = path;
+
+    loop {
+        match fs::metadata(candidate) {
+            Ok(metadata) => return Ok(metadata.dev()),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                match fs::symlink_metadata(candidate) {
+                    Ok(_) => {
+                        return Err(PreviewProblem::blocked(format!(
+                            "{} exists and is not a directory",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                        return Err(PreviewProblem::permission_denied(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                    Err(err) => {
+                        return Err(PreviewProblem::blocked(format!(
+                            "failed inspecting {}: {err}",
+                            candidate.display()
+                        )));
+                    }
+                }
+                let Some(parent) = candidate.parent() else {
+                    return Err(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                };
+                if parent == candidate {
+                    return Err(PreviewProblem::blocked(format!(
+                        "failed finding existing parent for {}",
+                        path.display()
+                    )));
+                }
+                candidate = parent;
+            }
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                return Err(PreviewProblem::permission_denied(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+            Err(err) => {
+                return Err(PreviewProblem::blocked(format!(
+                    "failed inspecting {}: {err}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+}
+
+fn validate_existing_directory_writable(path: &Path) -> Option<PreviewProblem> {
+    if directory_is_writable(path) {
+        None
+    } else {
+        Some(PreviewProblem::permission_denied(format!(
+            "{} is not writable",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn directory_is_writable(path: &Path) -> bool {
+    path_has_access(path, libc::W_OK | libc::X_OK)
+}
+
+#[cfg(unix)]
+fn file_is_readable(path: &Path) -> bool {
+    path_has_access(path, libc::R_OK)
+}
+
+#[cfg(unix)]
+fn path_has_access(path: &Path, mode: libc::c_int) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    unsafe { libc::access(path.as_ptr(), mode) == 0 }
+}
+
+#[cfg(not(unix))]
+fn directory_is_writable(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(metadata) => !metadata.permissions().readonly(),
+        Err(_) => false,
+    }
+}
+
+fn should_defer_to_elevation(
+    scope: LinkScope,
+    options: PreviewOptions,
+    error_kind: ErrorKind,
+) -> bool {
+    should_defer_problem_to_elevation(scope, options, error_kind == ErrorKind::PermissionDenied)
+}
+
+fn should_defer_problem_to_elevation(
+    scope: LinkScope,
+    options: PreviewOptions,
+    elevation_may_fix: bool,
+) -> bool {
+    scope == LinkScope::System && options.system_links_may_use_elevation && elevation_may_fix
+}
+
 fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<PathBuf> {
     fs::create_dir_all(backup_directory)
         .with_context(|| format!("failed creating {}", backup_directory.display()))?;
@@ -553,6 +1171,50 @@ mod tests {
     }
 
     #[test]
+    fn elevated_system_preview_defers_permission_problem() {
+        let state = PreviewProblem::permission_denied("root-only").into_preview_state(
+            LinkScope::System,
+            PreviewOptions {
+                system_links_may_use_elevation: true,
+            },
+        );
+
+        assert!(matches!(state, LinkPreviewState::NeedsElevation { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sticky_directory_replacement_requires_entry_or_directory_owner() {
+        let sticky_mode = sticky_bit() | 0o777;
+
+        assert!(!sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1002
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1001
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            1000
+        ));
+        assert!(sticky_directory_allows_replacement(
+            sticky_mode,
+            1000,
+            1001,
+            0
+        ));
+        assert!(sticky_directory_allows_replacement(0o777, 1000, 1001, 1002));
+    }
+
+    #[test]
     fn host_matching_accepts_short_and_full_names() {
         assert!(host_matches(
             &[String::from("workstation")],
@@ -575,6 +1237,27 @@ mod tests {
             &[String::from("workstation.other.test")],
             "workstation.example.test"
         ));
+    }
+
+    #[test]
+    fn preview_respects_host_filters() {
+        let mut symlinks = BTreeMap::new();
+        symlinks.insert(
+            PathBuf::from("/definitely/missing/source"),
+            LinkConfig {
+                destinations: vec![PathBuf::from("/definitely/missing/destination")],
+                hosts: vec![String::from("definitely-not-this-host.invalid")],
+            },
+        );
+        let config = DotConf {
+            backup_directory: PathBuf::from("/tmp/dot-conf-backups"),
+            symlinks,
+            sys_symlinks: BTreeMap::new(),
+        };
+
+        let previews = config.preview(Scope::User).unwrap();
+
+        assert!(previews.is_empty());
     }
 
     #[cfg(windows)]

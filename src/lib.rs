@@ -466,12 +466,13 @@ fn current_hostname() -> Result<String> {
 }
 
 fn host_matches(hosts: &[String], current_host: &str) -> bool {
-    let (current_short, _) = hostname_parts(current_host);
+    let (current_short, current_is_fqdn) = hostname_parts(current_host);
 
     hosts.iter().any(|host| {
-        let (_, host_is_fqdn) = hostname_parts(host);
+        let (host_short, host_is_fqdn) = hostname_parts(host);
         host.eq_ignore_ascii_case(current_host)
             || (!host_is_fqdn && host.eq_ignore_ascii_case(current_short))
+            || (!current_is_fqdn && host_short.eq_ignore_ascii_case(current_host))
     })
 }
 
@@ -1254,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    fn host_matching_accepts_short_and_full_names() {
+    fn host_matching_accepts_short_and_fully_qualified_forms() {
         assert!(host_matches(
             &[String::from("workstation")],
             "workstation.example.test"
@@ -1267,7 +1268,7 @@ mod tests {
             &[String::from("WORKSTATION")],
             "workstation.example.test"
         ));
-        assert!(!host_matches(
+        assert!(host_matches(
             &[String::from("workstation.example.test")],
             "workstation"
         ));

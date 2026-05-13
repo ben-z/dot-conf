@@ -170,6 +170,42 @@ symlinks:
 
 #[test]
 #[serial]
+fn rejects_source_destination_self_mapping() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        let source = cfg_dir.join(".vimrc");
+        write_file(&source, "set nu");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            format!(
+                "backup_directory: ~/.config/backup\nsymlinks:\n  {}: {}\n",
+                source.display(),
+                source.display()
+            ),
+        )
+        .unwrap();
+
+        let err = DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("source and destination are the same path"));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "set nu");
+        assert!(!source.is_symlink());
+        assert!(!home.join(".config/backup").exists());
+    });
+}
+
+#[test]
+#[serial]
 fn applies_matching_host_links_only() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();

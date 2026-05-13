@@ -315,6 +315,7 @@ impl DotConf {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed creating {}", parent.display()))?;
                 }
+                ensure_source_and_destination_differ(source, destination)?;
                 backup_and_remove_if_exists(&self.backup_directory, destination)?;
                 create_symlink(source, destination)?;
             }
@@ -412,6 +413,44 @@ fn normalize_links(
         );
     }
     Ok(normalized)
+}
+
+fn ensure_source_and_destination_differ(source: &Path, destination: &Path) -> Result<()> {
+    if source == destination {
+        bail!(
+            "source and destination are the same path: {}",
+            source.display()
+        );
+    }
+
+    let destination_metadata = match fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed inspecting {}", destination.display()));
+        }
+    };
+
+    if destination_metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("failed resolving {}", source.display()))?;
+    let destination = destination
+        .canonicalize()
+        .with_context(|| format!("failed resolving {}", destination.display()))?;
+
+    if source == destination {
+        bail!(
+            "source and destination resolve to the same path: {}",
+            source.display()
+        );
+    }
+
+    Ok(())
 }
 
 fn current_hostname() -> Result<String> {

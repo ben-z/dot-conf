@@ -7,10 +7,11 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 /// Which configured links to apply.
 ///
@@ -32,9 +33,9 @@ pub enum Scope {
 struct RawConfig {
     backup_directory: PathBuf,
     #[serde(default)]
-    symlinks: BTreeMap<PathBuf, OneOrMany>,
+    symlinks: BTreeMap<PathBuf, RawLink>,
     #[serde(default)]
-    sys_symlinks: BTreeMap<PathBuf, OneOrMany>,
+    sys_symlinks: BTreeMap<PathBuf, RawLink>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,12 +54,65 @@ impl OneOrMany {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OneOrManyString {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Default for OneOrManyString {
+    fn default() -> Self {
+        Self::Many(Vec::new())
+    }
+}
+
+impl OneOrManyString {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawLink {
+    Destinations(OneOrMany),
+    Options(RawLinkOptions),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLinkOptions {
+    #[serde(alias = "destination")]
+    destinations: OneOrMany,
+    #[serde(default, alias = "host")]
+    hosts: OneOrManyString,
+}
+
+impl RawLink {
+    fn into_parts(self) -> (OneOrMany, Vec<String>) {
+        match self {
+            Self::Destinations(destinations) => (destinations, Vec::new()),
+            Self::Options(options) => (options.destinations, options.hosts.into_vec()),
+        }
+    }
+}
+
 /// Parsed dot-conf configuration ready to apply.
 #[derive(Debug)]
 pub struct DotConf {
     backup_directory: PathBuf,
-    symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
-    sys_symlinks: BTreeMap<PathBuf, Vec<PathBuf>>,
+    symlinks: BTreeMap<PathBuf, LinkConfig>,
+    sys_symlinks: BTreeMap<PathBuf, LinkConfig>,
+}
+
+#[derive(Debug)]
+struct LinkConfig {
+    destinations: Vec<PathBuf>,
+    hosts: Vec<String>,
 }
 
 impl DotConf {
@@ -107,19 +161,34 @@ impl DotConf {
     /// Existing file and symlink destinations are backed up before they are
     /// replaced. Missing source files are skipped with a warning.
     pub fn apply(&self, scope: Scope) -> Result<()> {
+        let mut current_host = None;
         match scope {
             Scope::All => {
-                self.apply_links(&self.sys_symlinks)?;
-                self.apply_links(&self.symlinks)?;
+                self.apply_links(&self.sys_symlinks, &mut current_host)?;
+                self.apply_links(&self.symlinks, &mut current_host)?;
             }
-            Scope::User => self.apply_links(&self.symlinks)?,
-            Scope::Sys => self.apply_links(&self.sys_symlinks)?,
+            Scope::User => self.apply_links(&self.symlinks, &mut current_host)?,
+            Scope::Sys => self.apply_links(&self.sys_symlinks, &mut current_host)?,
         }
         Ok(())
     }
 
-    fn apply_links(&self, links: &BTreeMap<PathBuf, Vec<PathBuf>>) -> Result<()> {
-        for (source, destinations) in links {
+    fn apply_links(
+        &self,
+        links: &BTreeMap<PathBuf, LinkConfig>,
+        current_host: &mut Option<String>,
+    ) -> Result<()> {
+        for (source, link) in links {
+            if !link.hosts.is_empty() {
+                if current_host.is_none() {
+                    *current_host = Some(current_hostname()?);
+                }
+                let hostname = current_host.as_deref().expect("hostname was initialized");
+                if !host_matches(&link.hosts, hostname) {
+                    continue;
+                }
+            }
+
             match fs::metadata(source) {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -132,7 +201,7 @@ impl DotConf {
                 }
             };
 
-            for destination in destinations {
+            for destination in &link.destinations {
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed creating {}", parent.display()))?;
@@ -148,10 +217,11 @@ impl DotConf {
 fn normalize_links(
     source_base: &Path,
     destination_base: &Path,
-    links: BTreeMap<PathBuf, OneOrMany>,
-) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>> {
+    links: BTreeMap<PathBuf, RawLink>,
+) -> Result<BTreeMap<PathBuf, LinkConfig>> {
     let mut normalized = BTreeMap::new();
-    for (source, destinations) in links {
+    for (source, raw_link) in links {
+        let (destinations, hosts) = raw_link.into_parts();
         let resolved_source = resolve_against(source_base, &source)
             .with_context(|| format!("failed resolving source {}", source.display()))?;
         let resolved_destinations = destinations
@@ -163,9 +233,43 @@ fn normalize_links(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        normalized.insert(resolved_source, resolved_destinations);
+        normalized.insert(
+            resolved_source,
+            LinkConfig {
+                destinations: resolved_destinations,
+                hosts,
+            },
+        );
     }
     Ok(normalized)
+}
+
+fn current_hostname() -> Result<String> {
+    hostname::get()
+        .context("failed reading hostname")?
+        .into_string()
+        .map_err(|hostname| {
+            anyhow!(
+                "hostname is not valid UTF-8: {}",
+                hostname.to_string_lossy()
+            )
+        })
+}
+
+fn host_matches(hosts: &[String], current_host: &str) -> bool {
+    let (current_short, _) = hostname_parts(current_host);
+
+    hosts.iter().any(|host| {
+        let (_, host_is_fqdn) = hostname_parts(host);
+        host.eq_ignore_ascii_case(current_host)
+            || (!host_is_fqdn && host.eq_ignore_ascii_case(current_short))
+    })
+}
+
+fn hostname_parts(hostname: &str) -> (&str, bool) {
+    hostname
+        .split_once('.')
+        .map_or((hostname, false), |(short, _)| (short, true))
 }
 
 fn resolve_from_cwd(path: &Path) -> Result<PathBuf> {
@@ -293,16 +397,23 @@ fn unique_backup_path(backup_directory: &Path, destination: &Path) -> Result<Pat
     fs::create_dir_all(backup_directory)
         .with_context(|| format!("failed creating {}", backup_directory.display()))?;
 
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let timestamp = backup_timestamp(SystemTime::now())?;
     let name = backup_name(destination);
     let hash = path_hash(destination);
-    let backup = backup_directory.join(format!("{name}.{hash:016x}.{ts}.bak"));
+    let backup = backup_directory.join(format!("{name}.{timestamp}.{hash:016x}.bak"));
 
     match fs::symlink_metadata(&backup) {
         Ok(_) => bail!("backup path {} already exists", backup.display()),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(backup),
         Err(err) => Err(err).with_context(|| format!("failed inspecting {}", backup.display())),
     }
+}
+
+fn backup_timestamp(now: SystemTime) -> Result<String> {
+    let timestamp = OffsetDateTime::from(now)
+        .format(&Rfc3339)
+        .context("failed formatting backup timestamp")?;
+    Ok(timestamp.replace(':', "-"))
 }
 
 fn symlink_backup_target(destination: &Path) -> Result<PathBuf> {
@@ -439,6 +550,31 @@ mod tests {
         let expanded = expand_tilde_with_home(&path, Some(Path::new("/tmp/home"))).unwrap();
 
         assert_eq!(expanded.as_os_str().as_bytes(), b"/tmp/home/foo\xffbar");
+    }
+
+    #[test]
+    fn host_matching_accepts_short_and_full_names() {
+        assert!(host_matches(
+            &[String::from("workstation")],
+            "workstation.example.test"
+        ));
+        assert!(host_matches(
+            &[String::from("workstation.example.test")],
+            "workstation.example.test"
+        ));
+        assert!(host_matches(
+            &[String::from("WORKSTATION")],
+            "workstation.example.test"
+        ));
+        assert!(!host_matches(
+            &[String::from("workstation.example.test")],
+            "workstation"
+        ));
+        assert!(host_matches(&[String::from("workstation")], "workstation"));
+        assert!(!host_matches(
+            &[String::from("workstation.other.test")],
+            "workstation.example.test"
+        ));
     }
 
     #[cfg(windows)]

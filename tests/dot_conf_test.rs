@@ -23,6 +23,26 @@ fn with_home<R>(path: &Path, test: impl FnOnce() -> R) -> R {
     temp_env::with_vars(vars, test)
 }
 
+fn current_test_hostname() -> String {
+    hostname::get().unwrap().into_string().unwrap()
+}
+
+fn short_hostname(hostname: &str) -> &str {
+    hostname
+        .split_once('.')
+        .map_or(hostname, |(short, _)| short)
+}
+
+fn non_matching_hostname(hostname: &str) -> String {
+    let short = short_hostname(hostname);
+    let candidate = "dot-conf-unmatched-host";
+    if candidate.eq_ignore_ascii_case(hostname) || candidate.eq_ignore_ascii_case(short) {
+        "dot-conf-unmatched-host-2".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
 #[cfg(unix)]
 fn create_file_symlink(source: &Path, destination: &Path) {
     std::os::unix::fs::symlink(source, destination).unwrap();
@@ -138,6 +158,61 @@ symlinks:
             .collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read_to_string(&backups[0]).unwrap(), "old");
+
+        let backup_name = backups[0].file_name().unwrap().to_string_lossy();
+        assert!(backup_name.starts_with(".vimrc."));
+        assert!(backup_name.ends_with(".bak"));
+        assert!(backup_name.contains('T'));
+        assert!(backup_name.contains("Z."));
+        assert!(!backup_name.contains(':'));
+    });
+}
+
+#[test]
+#[serial]
+fn applies_matching_host_links_only() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        let hostname = current_test_hostname();
+        let matching_host = short_hostname(&hostname);
+        let non_matching_host = non_matching_hostname(&hostname);
+        write_file(&cfg_dir.join("always"), "always");
+        write_file(&cfg_dir.join("work"), "work");
+        write_file(&cfg_dir.join("personal"), "personal");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            format!(
+                r#"backup_directory: ~/.config/backup
+symlinks:
+  always: ~/always
+  work:
+    destinations: ~/work
+    host: {matching_host}
+  personal:
+    destinations:
+      - ~/personal
+    hosts:
+      - {non_matching_host}
+"#
+            ),
+        )
+        .unwrap();
+
+        DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        assert!(home.join("always").is_symlink());
+        assert!(home.join("work").is_symlink());
+        assert!(!home.join("personal").exists());
     });
 }
 

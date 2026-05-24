@@ -57,9 +57,16 @@ pub enum LinkPreviewState {
     MissingSource,
     /// The destination is absent, so a new symlink would be created.
     Create,
+    /// The destination already links to the configured source.
+    Unchanged,
     /// The destination is a file and would be backed up before replacement.
     ReplaceFile {
         /// The directory where the existing file would be backed up.
+        backup_directory: PathBuf,
+    },
+    /// The destination is a directory and would be backed up before replacement.
+    ReplaceDirectory {
+        /// The directory where the existing directory would be backed up.
         backup_directory: PathBuf,
     },
     /// The destination is a symlink and would be backed up before replacement.
@@ -93,9 +100,9 @@ pub struct PreviewOptions {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     backup_directory: PathBuf,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_link_map")]
     symlinks: BTreeMap<PathBuf, RawLink>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_link_map")]
     sys_symlinks: BTreeMap<PathBuf, RawLink>,
 }
 
@@ -162,6 +169,41 @@ impl RawLink {
     }
 }
 
+fn deserialize_link_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<PathBuf, RawLink>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct LinkMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for LinkMapVisitor {
+        type Value = BTreeMap<PathBuf, RawLink>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map from source paths to link definitions")
+        }
+
+        fn visit_map<M>(self, mut access: M) -> std::result::Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut links = BTreeMap::new();
+            while let Some((source, link)) = access.next_entry::<PathBuf, RawLink>()? {
+                if links.insert(source.clone(), link).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate source path {}",
+                        source.display()
+                    )));
+                }
+            }
+            Ok(links)
+        }
+    }
+
+    deserializer.deserialize_map(LinkMapVisitor)
+}
+
 /// Parsed dot-conf configuration ready to apply.
 #[derive(Debug)]
 pub struct DotConf {
@@ -204,17 +246,47 @@ impl DotConf {
     /// current directory.
     pub fn from_yaml_str(yaml: &str, source_base: &Path, destination_base: &Path) -> Result<Self> {
         let raw: RawConfig = serde_yml::from_str(yaml).context("failed parsing YAML")?;
+        let backup_directory = resolve_against(source_base, &raw.backup_directory)
+            .with_context(|| format!("failed resolving {}", raw.backup_directory.display()))?;
+        let symlinks = normalize_links(source_base, destination_base, raw.symlinks)?;
+        let sys_symlinks = normalize_links(source_base, destination_base, raw.sys_symlinks)?;
+        validate_unique_destinations(&symlinks, &sys_symlinks)?;
+
         Ok(Self {
-            backup_directory: resolve_against(source_base, &raw.backup_directory)
-                .with_context(|| format!("failed resolving {}", raw.backup_directory.display()))?,
-            symlinks: normalize_links(source_base, destination_base, raw.symlinks)?,
-            sys_symlinks: normalize_links(source_base, destination_base, raw.sys_symlinks)?,
+            backup_directory,
+            symlinks,
+            sys_symlinks,
         })
     }
 
     /// Return whether this configuration includes system links.
     pub fn requires_root(&self) -> bool {
         !self.sys_symlinks.is_empty()
+    }
+
+    /// Return whether this configuration has system links for the current host.
+    pub fn requires_root_for_current_host(&self) -> Result<bool> {
+        let mut current_host = None;
+        for link in self.sys_symlinks.values() {
+            if link_applies_to_current_host(link, &mut current_host)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Return the resolved destination paths configured for the requested scope.
+    pub fn destinations(&self, scope: Scope) -> Vec<PathBuf> {
+        let mut destinations = Vec::new();
+        match scope {
+            Scope::All => {
+                collect_destinations(&self.sys_symlinks, &mut destinations);
+                collect_destinations(&self.symlinks, &mut destinations);
+            }
+            Scope::User => collect_destinations(&self.symlinks, &mut destinations),
+            Scope::Sys => collect_destinations(&self.sys_symlinks, &mut destinations),
+        }
+        destinations
     }
 
     /// Inspect what applying the requested scope would do without changing files.
@@ -267,8 +339,8 @@ impl DotConf {
 
     /// Apply configured symlinks for the requested scope.
     ///
-    /// Existing file and symlink destinations are backed up before they are
-    /// replaced. Missing source files are skipped with a warning.
+    /// Existing file, directory, and symlink destinations are backed up before
+    /// they are replaced. Missing source files are skipped with a warning.
     pub fn apply(&self, scope: Scope) -> Result<()> {
         let mut current_host = None;
         match scope {
@@ -288,14 +360,8 @@ impl DotConf {
         current_host: &mut Option<String>,
     ) -> Result<()> {
         for (source, link) in links {
-            if !link.hosts.is_empty() {
-                if current_host.is_none() {
-                    *current_host = Some(current_hostname()?);
-                }
-                let hostname = current_host.as_deref().expect("hostname was initialized");
-                if !host_matches(&link.hosts, hostname) {
-                    continue;
-                }
+            if !link_applies_to_current_host(link, current_host)? {
+                continue;
             }
 
             match fs::metadata(source) {
@@ -316,6 +382,9 @@ impl DotConf {
                         .with_context(|| format!("failed creating {}", parent.display()))?;
                 }
                 ensure_source_and_destination_differ(source, destination)?;
+                if destination_already_links_to_source(destination, source)? {
+                    continue;
+                }
                 backup_and_remove_if_exists(&self.backup_directory, destination)?;
                 create_symlink(source, destination)?;
             }
@@ -332,14 +401,8 @@ impl DotConf {
         current_host: &mut Option<String>,
     ) -> Result<()> {
         for (source, link) in links {
-            if !link.hosts.is_empty() {
-                if current_host.is_none() {
-                    *current_host = Some(current_hostname()?);
-                }
-                let hostname = current_host.as_deref().expect("hostname was initialized");
-                if !host_matches(&link.hosts, hostname) {
-                    continue;
-                }
+            if !link_applies_to_current_host(link, current_host)? {
+                continue;
             }
 
             let source_exists = match fs::metadata(source) {
@@ -369,7 +432,13 @@ impl DotConf {
 
             for destination in &link.destinations {
                 let state = if source_exists {
-                    preview_destination(&self.backup_directory, destination, scope, options)?
+                    preview_destination(
+                        &self.backup_directory,
+                        source,
+                        destination,
+                        scope,
+                        options,
+                    )?
                 } else {
                     LinkPreviewState::MissingSource
                 };
@@ -382,6 +451,12 @@ impl DotConf {
             }
         }
         Ok(())
+    }
+}
+
+fn collect_destinations(links: &BTreeMap<PathBuf, LinkConfig>, destinations: &mut Vec<PathBuf>) {
+    for link in links.values() {
+        destinations.extend(link.destinations.iter().cloned());
     }
 }
 
@@ -404,15 +479,59 @@ fn normalize_links(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        normalized.insert(
-            resolved_source,
-            LinkConfig {
-                destinations: resolved_destinations,
-                hosts,
-            },
-        );
+        if normalized
+            .insert(
+                resolved_source.clone(),
+                LinkConfig {
+                    destinations: resolved_destinations,
+                    hosts,
+                },
+            )
+            .is_some()
+        {
+            bail!(
+                "source {} is configured more than once after path resolution",
+                resolved_source.display()
+            );
+        }
     }
     Ok(normalized)
+}
+
+fn validate_unique_destinations(
+    symlinks: &BTreeMap<PathBuf, LinkConfig>,
+    sys_symlinks: &BTreeMap<PathBuf, LinkConfig>,
+) -> Result<()> {
+    let mut seen = BTreeMap::new();
+    for (scope, links) in [
+        (LinkScope::User, symlinks),
+        (LinkScope::System, sys_symlinks),
+    ] {
+        for (source, link) in links {
+            for destination in &link.destinations {
+                if let Some((previous_scope, previous_source)) =
+                    seen.insert(destination.clone(), (scope, source.clone()))
+                {
+                    bail!(
+                        "destination {} is configured more than once ({} source {} and {} source {})",
+                        destination.display(),
+                        section_name(previous_scope),
+                        previous_source.display(),
+                        section_name(scope),
+                        source.display()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn section_name(scope: LinkScope) -> &'static str {
+    match scope {
+        LinkScope::User => "symlinks",
+        LinkScope::System => "sys_symlinks",
+    }
 }
 
 fn ensure_source_and_destination_differ(source: &Path, destination: &Path) -> Result<()> {
@@ -466,13 +585,15 @@ fn current_hostname() -> Result<String> {
 }
 
 fn host_matches(hosts: &[String], current_host: &str) -> bool {
-    let (current_short, current_is_fqdn) = hostname_parts(current_host);
+    let (current_short, _) = hostname_parts(current_host);
 
     hosts.iter().any(|host| {
-        let (host_short, host_is_fqdn) = hostname_parts(host);
-        host.eq_ignore_ascii_case(current_host)
-            || (!host_is_fqdn && host.eq_ignore_ascii_case(current_short))
-            || (!current_is_fqdn && host_short.eq_ignore_ascii_case(current_host))
+        let (_, host_is_fqdn) = hostname_parts(host);
+        if host_is_fqdn {
+            host.eq_ignore_ascii_case(current_host)
+        } else {
+            host.eq_ignore_ascii_case(current_short)
+        }
     })
 }
 
@@ -480,6 +601,20 @@ fn hostname_parts(hostname: &str) -> (&str, bool) {
     hostname
         .split_once('.')
         .map_or((hostname, false), |(short, _)| (short, true))
+}
+
+fn link_applies_to_current_host(
+    link: &LinkConfig,
+    current_host: &mut Option<String>,
+) -> Result<bool> {
+    if link.hosts.is_empty() {
+        return Ok(true);
+    }
+    if current_host.is_none() {
+        *current_host = Some(current_hostname()?);
+    }
+    let hostname = current_host.as_deref().expect("hostname was initialized");
+    Ok(host_matches(&link.hosts, hostname))
 }
 
 fn resolve_from_cwd(path: &Path) -> Result<PathBuf> {
@@ -597,14 +732,20 @@ fn backup_and_remove_if_exists(backup_directory: &Path, destination: &Path) -> R
         return Ok(());
     }
 
+    if metadata.is_dir() {
+        move_directory(destination, &backup)?;
+        return Ok(());
+    }
+
     bail!(
-        "destination {} exists and is not a file/symlink",
+        "destination {} exists and is not a file/directory/symlink",
         destination.display()
     )
 }
 
 fn preview_destination(
     backup_directory: &Path,
+    source: &Path,
     destination: &Path,
     scope: LinkScope,
     options: PreviewOptions,
@@ -642,6 +783,9 @@ fn preview_destination(
 
     if metadata.file_type().is_symlink() {
         let target = symlink_backup_target(destination)?;
+        if path_resolves_to_same_file(&target, source) {
+            return Ok(LinkPreviewState::Unchanged);
+        }
         if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
         {
             return Ok(problem.into_preview_state(scope, options));
@@ -662,8 +806,18 @@ fn preview_destination(
         });
     }
 
+    if metadata.is_dir() {
+        if let Some(problem) = validate_replacement_paths(backup_directory, destination, &metadata)
+        {
+            return Ok(problem.into_preview_state(scope, options));
+        }
+        return Ok(LinkPreviewState::ReplaceDirectory {
+            backup_directory: backup_directory.to_path_buf(),
+        });
+    }
+
     Ok(LinkPreviewState::Blocked {
-        reason: "destination exists and is not a file/symlink".to_string(),
+        reason: "destination exists and is not a file/directory/symlink".to_string(),
     })
 }
 
@@ -1074,6 +1228,36 @@ fn backup_timestamp(now: SystemTime) -> Result<String> {
     Ok(timestamp.replace(':', "-"))
 }
 
+fn destination_already_links_to_source(destination: &Path, source: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed inspecting {}", destination.display()));
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+
+    let target = symlink_backup_target(destination)?;
+    Ok(path_resolves_to_same_file(&target, source))
+}
+
+fn path_resolves_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let Ok(left) = left.canonicalize() else {
+        return false;
+    };
+    let Ok(right) = right.canonicalize() else {
+        return false;
+    };
+    left == right
+}
+
 fn symlink_backup_target(destination: &Path) -> Result<PathBuf> {
     let target = fs::read_link(destination)
         .with_context(|| format!("failed reading symlink {}", destination.display()))?;
@@ -1133,6 +1317,10 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> Result<()> {
         }
         Err(err) => Err(err).with_context(|| format!("failed moving {}", source.display())),
     }
+}
+
+fn move_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination).with_context(|| format!("failed moving {}", source.display()))
 }
 
 fn create_symlink(source: &Path, destination: &Path) -> Result<()> {
@@ -1268,7 +1456,7 @@ mod tests {
             &[String::from("WORKSTATION")],
             "workstation.example.test"
         ));
-        assert!(host_matches(
+        assert!(!host_matches(
             &[String::from("workstation.example.test")],
             "workstation"
         ));

@@ -5,7 +5,7 @@
 ## Why this version
 
 - **Simple mental model:** map `source -> destination` symlinks.
-- **Safe updates:** existing destination files are backed up before replacement.
+- **Safe updates:** existing destination files, directories, and symlinks are backed up before replacement.
 - **Flexible mapping:** one source can target many destinations.
 - **Intuitive tooling:** install from prebuilt binaries or `cargo`.
 
@@ -90,9 +90,11 @@ symlinks:
 - Destination and backup paths support `~` expansion for the current user's home directory.
 - A symlink entry can use `destinations` plus `host` or `hosts` to apply only on matching hostnames.
 - Missing source files are skipped with a warning.
+- Re-running an already-correct link leaves it in place without creating a backup.
 - Backup directories are created lazily only when an existing destination is backed up.
 - Backup filenames include the destination name, a readable UTC timestamp, and a destination hash.
 - Config files are all parsed before any changes are applied.
+- Duplicate source keys and duplicate destination mappings are rejected.
 - When applying both user and system links from a non-root shell, system links are applied with `sudo` first; user links are applied only after that succeeds.
 - Dry runs validate obvious destination and backup-directory blockers. System links that need `sudo` may be reported as needing elevated validation instead of hard-failing from a non-root preview.
 - Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.

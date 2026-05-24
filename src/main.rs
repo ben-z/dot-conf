@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::{ArgAction, Parser, ValueEnum};
 use dot_conf::{DotConf, LinkPreview, LinkPreviewState, LinkScope, PreviewOptions, Scope};
 use log::LevelFilter;
+use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::env;
 use std::path::PathBuf;
@@ -13,7 +14,7 @@ use std::process::Command;
     name = "dot-conf",
     version,
     about = "Apply dot-conf configuration files",
-    long_about = "Apply dot-conf YAML configs by creating symlinks and backing up existing file or symlink destinations before replacement."
+    long_about = "Apply dot-conf YAML configs by creating symlinks and backing up existing file, directory, or symlink destinations before replacement."
 )]
 struct Cli {
     #[arg(
@@ -122,8 +123,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_logger(&cli);
 
-    let configs = load_configs(&cli.filenames)?;
     let scope = cli.resolved_scope();
+    let configs = load_configs(&cli.filenames)?;
+    validate_config_destinations(&configs, scope)?;
 
     if cli.dry_run {
         return print_dry_run(&configs, scope);
@@ -153,16 +155,26 @@ fn load_configs(filenames: &[PathBuf]) -> anyhow::Result<Vec<NamedConfig>> {
         .collect()
 }
 
+fn validate_config_destinations(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
+    let mut seen = BTreeMap::new();
+    for named in configs {
+        for destination in named.config.destinations(scope) {
+            if let Some(previous) = seen.insert(destination.clone(), named.filename.clone()) {
+                anyhow::bail!(
+                    "destination {} is configured more than once ({} and {})",
+                    destination.display(),
+                    previous.display(),
+                    named.filename.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_configs(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
-    if scope == Scope::All
-        && configs.iter().any(|config| config.config.requires_root())
-        && !is_elevated()
-    {
-        let system_config_filenames: Vec<_> = configs
-            .iter()
-            .filter(|config| config.config.requires_root())
-            .map(|config| config.filename.clone())
-            .collect();
+    let system_config_filenames = system_config_filenames_requiring_elevation(configs, scope)?;
+    if !system_config_filenames.is_empty() && !is_elevated() {
         apply_system_config_with_elevation(&system_config_filenames)?;
         return apply_scope(configs, Scope::User);
     }
@@ -182,7 +194,7 @@ fn apply_scope(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
 
 fn print_dry_run(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<()> {
     println!("Dry run: no files will be changed.");
-    let preview_options = preview_options(configs, scope);
+    let preview_options = preview_options(configs, scope)?;
     if preview_options.system_links_may_use_elevation {
         if is_elevated() {
             println!("System links would be applied before user links.");
@@ -233,8 +245,15 @@ fn print_preview(preview: &LinkPreview) {
         LinkPreviewState::Create => {
             println!("  [{scope}] create {destination} -> {source}");
         }
+        LinkPreviewState::Unchanged => {
+            println!("  [{scope}] unchanged {destination} -> {source}");
+        }
         LinkPreviewState::ReplaceFile { backup_directory } => {
             println!("  [{scope}] replace file {destination} -> {source}");
+            println!("    backup directory: {}", backup_directory.display());
+        }
+        LinkPreviewState::ReplaceDirectory { backup_directory } => {
+            println!("  [{scope}] replace directory {destination} -> {source}");
             println!("    backup directory: {}", backup_directory.display());
         }
         LinkPreviewState::ReplaceSymlink {
@@ -254,12 +273,33 @@ fn print_preview(preview: &LinkPreview) {
     }
 }
 
-fn preview_options(configs: &[NamedConfig], scope: Scope) -> PreviewOptions {
-    PreviewOptions {
-        system_links_may_use_elevation: scope == Scope::All
-            && !is_elevated()
-            && configs.iter().any(|config| config.config.requires_root()),
+fn preview_options(configs: &[NamedConfig], scope: Scope) -> anyhow::Result<PreviewOptions> {
+    Ok(PreviewOptions {
+        system_links_may_use_elevation: !is_elevated()
+            && !system_config_filenames_requiring_elevation(configs, scope)?.is_empty(),
+    })
+}
+
+fn system_config_filenames_requiring_elevation(
+    configs: &[NamedConfig],
+    scope: Scope,
+) -> anyhow::Result<Vec<PathBuf>> {
+    if scope != Scope::All {
+        return Ok(Vec::new());
     }
+
+    configs
+        .iter()
+        .filter_map(
+            |config| match config.config.requires_root_for_current_host() {
+                Ok(true) => Some(Ok(config.filename.clone())),
+                Ok(false) => None,
+                Err(err) => Some(Err(err).with_context(|| {
+                    format!("checking system links for {}", config.filename.display())
+                })),
+            },
+        )
+        .collect()
 }
 
 fn scope_label(scope: Scope) -> &'static str {

@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
-use dot_conf::{DotConf, Scope};
+use dot_conf::{DotConf, LinkPreviewState, Scope};
 use tempfile::tempdir;
 
 fn write_file(path: &Path, contents: &str) {
@@ -165,6 +165,93 @@ symlinks:
         assert!(backup_name.contains('T'));
         assert!(backup_name.contains("Z."));
         assert!(!backup_name.contains(':'));
+    });
+}
+
+#[test]
+#[serial]
+fn reapplying_existing_link_is_noop() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        write_file(&cfg_dir.join(".vimrc"), "new");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+"#,
+        )
+        .unwrap();
+
+        let conf = DotConf::from_yaml_file(&yaml).unwrap();
+        conf.apply(Scope::User).unwrap();
+
+        let previews = conf.preview(Scope::User).unwrap();
+        assert_eq!(previews.len(), 1);
+        assert!(matches!(previews[0].state, LinkPreviewState::Unchanged));
+
+        conf.apply(Scope::User).unwrap();
+
+        assert!(home.join(".vimrc").is_symlink());
+        assert_eq!(
+            home.join(".vimrc").canonicalize().unwrap(),
+            cfg_dir.join(".vimrc").canonicalize().unwrap()
+        );
+        assert!(!home.join(".config/backup").exists());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn creates_backup_for_existing_directories() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+    with_home(&home, || {
+        write_file(&cfg_dir.join("nvim/init.lua"), "new");
+        write_file(&home.join(".config/nvim/init.lua"), "old");
+
+        let yaml = cfg_dir.join("config.yaml");
+        fs::write(
+            &yaml,
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  nvim: ~/.config/nvim
+"#,
+        )
+        .unwrap();
+
+        DotConf::from_yaml_file(&yaml)
+            .unwrap()
+            .apply(Scope::User)
+            .unwrap();
+
+        let backups: Vec<_> = fs::read_dir(home.join(".config/backup"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].is_dir());
+        assert_eq!(
+            fs::read_to_string(backups[0].join("init.lua")).unwrap(),
+            "old"
+        );
+        assert!(home.join(".config/nvim").is_symlink());
+        assert_eq!(
+            home.join(".config/nvim").canonicalize().unwrap(),
+            cfg_dir.join("nvim").canonicalize().unwrap()
+        );
     });
 }
 
@@ -335,6 +422,34 @@ fn creates_distinct_backups_for_matching_destination_names() {
         backup_contents.sort();
         assert_eq!(backup_contents, vec!["old-a", "old-b"]);
     });
+}
+
+#[test]
+#[serial]
+fn rejects_duplicate_source_keys() {
+    let yaml = r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+  .vimrc: ~/.vimrc2
+"#;
+
+    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+
+    assert!(format!("{err:#}").contains("duplicate source path"));
+}
+
+#[test]
+#[serial]
+fn rejects_duplicate_destinations() {
+    let yaml = r#"backup_directory: ~/.config/backup
+symlinks:
+  vimrc: ~/.profile
+  profile: ~/.profile
+"#;
+
+    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+
+    assert!(format!("{err:#}").contains("configured more than once"));
 }
 
 #[test]

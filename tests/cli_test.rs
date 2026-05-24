@@ -22,6 +22,26 @@ fn dot_conf_with_home(home: &Path) -> Command {
     command
 }
 
+fn current_test_hostname() -> String {
+    hostname::get().unwrap().into_string().unwrap()
+}
+
+fn short_hostname(hostname: &str) -> &str {
+    hostname
+        .split_once('.')
+        .map_or(hostname, |(short, _)| short)
+}
+
+fn non_matching_hostname(hostname: &str) -> String {
+    let short = short_hostname(hostname);
+    let candidate = "dot-conf-unmatched-host";
+    if candidate.eq_ignore_ascii_case(hostname) || candidate.eq_ignore_ascii_case(short) {
+        "dot-conf-unmatched-host-2".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -105,6 +125,83 @@ symlinks:
     assert!(stdout.contains("backup directory:"));
     assert_eq!(fs::read_to_string(home.join(".vimrc")).unwrap(), "old");
     assert!(!home.join(".config/backup").exists());
+}
+
+#[test]
+#[serial]
+fn dry_run_does_not_report_sudo_for_host_skipped_system_links() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    let non_matching_host = non_matching_hostname(&current_test_hostname());
+    write_file(&cfg_dir.join(".vimrc"), "user");
+    write_file(&cfg_dir.join(".sysrc"), "sys");
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+sys_symlinks:
+  .sysrc:
+    destinations: /tmp/dot-conf-host-skipped-sysrc
+    host: {non_matching_host}
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = dot_conf_with_home(&home)
+        .arg("--dry-run")
+        .arg(&yaml)
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("sudo"));
+    assert!(stdout.contains("[user] create"));
+    assert!(!stdout.contains("[system]"));
+}
+
+#[test]
+#[serial]
+fn all_scope_applies_user_links_without_sudo_when_system_links_are_host_skipped() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let home = root.join("home");
+    let cfg_dir = root.join("cfg");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    let non_matching_host = non_matching_hostname(&current_test_hostname());
+    write_file(&cfg_dir.join(".vimrc"), "user");
+    write_file(&cfg_dir.join(".sysrc"), "sys");
+    let yaml = cfg_dir.join("config.yaml");
+    fs::write(
+        &yaml,
+        format!(
+            r#"backup_directory: ~/.config/backup
+symlinks:
+  .vimrc: ~/.vimrc
+sys_symlinks:
+  .sysrc:
+    destinations: /tmp/dot-conf-host-skipped-sysrc
+    host: {non_matching_host}
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = dot_conf_with_home(&home).arg(&yaml).output().unwrap();
+
+    assert_success(&output);
+    assert!(home.join(".vimrc").is_symlink());
 }
 
 #[test]

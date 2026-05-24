@@ -41,6 +41,36 @@ fn assert_failure(output: &Output) {
 }
 
 #[test]
+fn prints_version_with_long_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dot-conf"))
+        .arg("--version")
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("dot-conf {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn prints_version_with_short_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dot-conf"))
+        .arg("-V")
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("dot-conf {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 #[serial]
 fn dry_run_reports_changes_without_mutating_files() {
     let tmp = tempdir().unwrap();

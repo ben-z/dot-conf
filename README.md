@@ -61,6 +61,7 @@ dot-conf config.yaml
 
 Options:
 
+- `--version`, `-V` print the installed `dot-conf` version
 - `--dry-run` preview resolved changes and path blockers without modifying files or invoking `sudo`
 - `--scope all|user|system` choose which config section(s) to apply
 - `--user-only` only apply `symlinks` (alias for `--scope user`)

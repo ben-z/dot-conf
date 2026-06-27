@@ -9,7 +9,7 @@ arch="$(uname -m)"
 
 case "$os:$arch" in
   Linux:x86_64|Linux:amd64)
-    target="x86_64-unknown-linux-gnu"
+    target="x86_64-unknown-linux-musl"
     ;;
   Darwin:x86_64|Darwin:amd64)
     target="x86_64-apple-darwin"

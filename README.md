@@ -23,7 +23,7 @@ By default, this installs to `~/.local/bin/dot-conf`. Set `DOT_CONF_INSTALL_DIR`
 
 1. Go to: <https://github.com/ben-z/dot-conf/releases/latest>
 2. Download the archive for your platform:
-   - `dot-conf-x86_64-unknown-linux-gnu.tar.gz`
+   - `dot-conf-x86_64-unknown-linux-musl.tar.gz`
    - `dot-conf-x86_64-apple-darwin.tar.gz`
    - `dot-conf-aarch64-apple-darwin.tar.gz`
    - `dot-conf-x86_64-pc-windows-msvc.zip`

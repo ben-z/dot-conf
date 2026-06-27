@@ -17,17 +17,20 @@
 curl -fsSL https://raw.githubusercontent.com/ben-z/dot-conf/master/scripts/install.sh | bash
 ```
 
-By default, this installs to `~/.local/bin/dot-conf`. Set `DOT_CONF_INSTALL_DIR` to override.
+The installer supports x86_64 and ARM64 macOS/Linux machines. By default, this installs to `~/.local/bin/dot-conf`. Set `DOT_CONF_INSTALL_DIR` to override.
 
 ### Option 2: download prebuilt binary from GitHub Releases
 
 1. Go to: <https://github.com/ben-z/dot-conf/releases/latest>
 2. Download the archive for your platform:
-   - `dot-conf-x86_64-unknown-linux-gnu.tar.gz`
+   - `dot-conf-x86_64-unknown-linux-musl.tar.gz`
+   - `dot-conf-aarch64-unknown-linux-musl.tar.gz`
    - `dot-conf-x86_64-apple-darwin.tar.gz`
    - `dot-conf-aarch64-apple-darwin.tar.gz`
    - `dot-conf-x86_64-pc-windows-msvc.zip`
 3. Extract and place `dot-conf` (or `dot-conf.exe`) into a directory on your `PATH`.
+
+The Linux archives are statically linked musl builds so they work across common glibc- and musl-based distributions, including older LTS releases.
 
 ### Option 3: install with Cargo
 
@@ -103,7 +106,7 @@ symlinks:
 
 - Pull requests and pushes to `master` run dependency audit, formatting, clippy, and tests on Linux/macOS/Windows.
 - Pull requests and pushes to `master` also build release binaries and upload them as workflow artifacts.
-- Creating a tag like `v0.2.0` triggers release automation that builds per-platform archives and publishes them to GitHub Releases.
+- Creating a version tag like `v0.1.1` triggers release automation that builds per-platform archives and publishes them to GitHub Releases.
 
 ## Development
 

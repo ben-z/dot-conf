@@ -20,6 +20,10 @@ jobs:
             target: x86_64-unknown-linux-musl
             bin: dot-conf
             archive: dot-conf-x86_64-unknown-linux-musl.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            bin: dot-conf
+            archive: dot-conf-aarch64-unknown-linux-musl.tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
             bin: dot-conf

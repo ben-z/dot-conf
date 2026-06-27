@@ -6,16 +6,20 @@ BIN_NAME="dot-conf"
 
 os="$(uname -s)"
 arch="$(uname -m)"
+targets=()
 
 case "$os:$arch" in
   Linux:x86_64|Linux:amd64)
-    target="x86_64-unknown-linux-musl"
+    targets=("x86_64-unknown-linux-musl" "x86_64-unknown-linux-gnu")
+    ;;
+  Linux:aarch64|Linux:arm64)
+    targets=("aarch64-unknown-linux-musl")
     ;;
   Darwin:x86_64|Darwin:amd64)
-    target="x86_64-apple-darwin"
+    targets=("x86_64-apple-darwin")
     ;;
   Darwin:arm64|Darwin:aarch64)
-    target="aarch64-apple-darwin"
+    targets=("aarch64-apple-darwin")
     ;;
   *)
     echo "Unsupported OS/architecture: $os/$arch"
@@ -24,15 +28,37 @@ case "$os:$arch" in
     ;;
 esac
 
-archive="${BIN_NAME}-${target}.tar.gz"
-url="https://github.com/${REPO}/releases/latest/download/${archive}"
-checksum_url="${url}.sha256"
-
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-curl -fsSL "$url" -o "$tmp_dir/$archive"
-curl -fsSL "$checksum_url" -o "$tmp_dir/$archive.sha256"
+archive=""
+for target in "${targets[@]}"; do
+  candidate_archive="${BIN_NAME}-${target}.tar.gz"
+  url="https://github.com/${REPO}/releases/latest/download/${candidate_archive}"
+  checksum_url="${url}.sha256"
+
+  if ! curl -fsSL "$url" -o "$tmp_dir/$candidate_archive" 2>/dev/null; then
+    rm -f "$tmp_dir/$candidate_archive" "$tmp_dir/$candidate_archive.sha256"
+    continue
+  fi
+
+  if ! curl -fsSL "$checksum_url" -o "$tmp_dir/$candidate_archive.sha256" 2>/dev/null; then
+    echo "Downloaded $candidate_archive, but could not download its checksum." >&2
+    echo "See https://github.com/${REPO}/releases/latest for published artifacts." >&2
+    exit 1
+  fi
+
+  archive="$candidate_archive"
+  break
+done
+
+if [[ -z "$archive" ]]; then
+  echo "Unable to download a compatible archive for $os/$arch" >&2
+  echo "Checked targets: ${targets[*]}" >&2
+  echo "See https://github.com/${REPO}/releases/latest for published artifacts." >&2
+  exit 1
+fi
+
 (
   cd "$tmp_dir"
   if command -v sha256sum >/dev/null 2>&1; then

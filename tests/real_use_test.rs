@@ -1,4 +1,3 @@
-use serial_test::serial;
 use std::fs;
 use std::path::Path;
 #[cfg(unix)]
@@ -55,7 +54,6 @@ fn backup_entries(home: &Path) -> Vec<PathBuf> {
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn workstation_bootstrap_is_previewable_repeatable_and_preserves_replaced_state() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -185,7 +183,6 @@ sys_symlinks:
 }
 
 #[test]
-#[serial]
 fn multiple_config_files_are_validated_before_any_link_is_applied() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();

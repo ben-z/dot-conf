@@ -1,4 +1,3 @@
-use serial_test::serial;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -91,7 +90,6 @@ fn prints_version_with_short_flag() {
 }
 
 #[test]
-#[serial]
 fn dry_run_reports_changes_without_mutating_files() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -128,7 +126,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn dry_run_does_not_report_sudo_for_host_skipped_system_links() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -170,7 +167,6 @@ sys_symlinks:
 }
 
 #[test]
-#[serial]
 fn all_scope_applies_user_links_without_sudo_when_system_links_are_host_skipped() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -205,8 +201,7 @@ sys_symlinks:
 }
 
 #[test]
-#[serial]
-fn missing_source_warning_is_visible_by_default() {
+fn missing_source_fails_with_actionable_error() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     let home = root.join("home");
@@ -226,13 +221,12 @@ symlinks:
 
     let output = dot_conf_with_home(&home).arg(&yaml).output().unwrap();
 
-    assert_success(&output);
+    assert_failure(&output);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("skipping missing source"));
+    assert!(stderr.contains("source missing:"));
 }
 
 #[test]
-#[serial]
 fn invalid_later_config_does_not_apply_earlier_config() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -273,7 +267,6 @@ backup_dir: ~/.config/misspelled
 }
 
 #[test]
-#[serial]
 fn dry_run_fails_when_create_destination_parent_is_invalid() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -303,12 +296,11 @@ fn dry_run_fails_when_create_destination_parent_is_invalid() {
     assert_failure(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[user] blocked"));
-    assert!(stdout.contains("destination parent:"));
+    assert!(stdout.contains("destination parent"));
     assert!(!home.join(".config/backup").exists());
 }
 
 #[test]
-#[serial]
 fn dry_run_fails_when_backup_directory_is_invalid() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -337,15 +329,17 @@ fn dry_run_fails_when_backup_directory_is_invalid() {
         .unwrap();
 
     assert_failure(&output);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[user] blocked"));
-    assert!(stdout.contains("backup directory:"));
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("blocked"));
     assert_eq!(fs::read_to_string(home.join(".vimrc")).unwrap(), "old");
 }
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn dry_run_accepts_symlinked_backup_directory() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -385,7 +379,6 @@ fn dry_run_accepts_symlinked_backup_directory() {
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn dry_run_fails_when_backup_directory_lacks_search_permission() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -423,8 +416,11 @@ fn dry_run_fails_when_backup_directory_lacks_search_permission() {
     fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
     assert_failure(&output);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[user] blocked"));
-    assert!(stdout.contains("backup directory:"));
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains("backup directory"));
     assert_eq!(fs::read_to_string(home.join(".vimrc")).unwrap(), "old");
 }

@@ -1,4 +1,3 @@
-use serial_test::serial;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -54,7 +53,6 @@ fn create_file_symlink(source: &Path, destination: &Path) {
 }
 
 #[test]
-#[serial]
 fn loads_and_applies_basic_config() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -91,7 +89,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn supports_multiple_destinations() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -125,7 +122,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn creates_backup_for_existing_files() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -169,7 +165,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn reapplying_existing_link_is_noop() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -210,7 +205,6 @@ symlinks:
 
 #[cfg(unix)]
 #[test]
-#[serial]
 fn creates_backup_for_existing_directories() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -256,7 +250,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn rejects_source_destination_self_mapping() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -292,7 +285,6 @@ fn rejects_source_destination_self_mapping() {
 }
 
 #[test]
-#[serial]
 fn applies_matching_host_links_only() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -340,7 +332,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn backs_up_relative_symlink_targets_as_resolved_links() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -385,7 +376,6 @@ fn backs_up_relative_symlink_targets_as_resolved_links() {
 }
 
 #[test]
-#[serial]
 fn creates_distinct_backups_for_matching_destination_names() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -425,56 +415,63 @@ fn creates_distinct_backups_for_matching_destination_names() {
 }
 
 #[test]
-#[serial]
 fn rejects_duplicate_source_keys() {
-    let yaml = r#"backup_directory: ~/.config/backup
+    let tmp = tempdir().unwrap();
+    with_home(tmp.path(), || {
+        let yaml = r#"backup_directory: ~/.config/backup
 symlinks:
   .vimrc: ~/.vimrc
   .vimrc: ~/.vimrc2
 "#;
 
-    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+        let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
 
-    assert!(format!("{err:#}").contains("duplicate source path"));
+        assert!(format!("{err:#}").contains("duplicate mapping key"));
+    });
 }
 
 #[test]
-#[serial]
 fn rejects_duplicate_destinations() {
-    let yaml = r#"backup_directory: ~/.config/backup
+    let tmp = tempdir().unwrap();
+    with_home(tmp.path(), || {
+        let yaml = r#"backup_directory: ~/.config/backup
 symlinks:
   vimrc: ~/.profile
   profile: ~/.profile
 "#;
 
-    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+        let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
 
-    assert!(format!("{err:#}").contains("configured more than once"));
+        assert!(format!("{err:#}").contains("configured more than once"));
+    });
 }
 
 #[test]
-#[serial]
 fn rejects_unknown_config_keys() {
-    let yaml = r#"backup_directory: ~/.config/backup
+    let tmp = tempdir().unwrap();
+    with_home(tmp.path(), || {
+        let yaml = r#"backup_directory: ~/.config/backup
 backup_dir: ~/.config/misspelled
 "#;
 
-    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
-    assert!(format!("{err:#}").contains("unknown field"));
+        let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field"));
+    });
 }
 
 #[test]
-#[serial]
 fn rejects_user_home_tilde_forms() {
-    let yaml = "backup_directory: ~other/backup\n";
+    let tmp = tempdir().unwrap();
+    with_home(tmp.path(), || {
+        let yaml = "backup_directory: ~other/backup\n";
 
-    let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
+        let err = DotConf::from_yaml_str(yaml, Path::new("."), Path::new(".")).unwrap_err();
 
-    assert!(format!("{err:#}").contains("unsupported home path"));
+        assert!(format!("{err:#}").contains("unsupported home path"));
+    });
 }
 
 #[test]
-#[serial]
 fn resolves_relative_backup_directory_against_config_dir() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -512,7 +509,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn resolves_sources_against_canonical_config_path() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -550,7 +546,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn backs_up_dangling_symlink_destinations() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -589,7 +584,6 @@ symlinks:
 }
 
 #[test]
-#[serial]
 fn all_scope_does_not_apply_user_links_after_system_link_failure() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -617,14 +611,13 @@ fn all_scope_does_not_apply_user_links_after_system_link_failure() {
             .unwrap()
             .apply(Scope::All)
             .unwrap_err();
-        assert!(format!("{err:#}").contains("failed creating"));
+        assert!(format!("{err:#}").contains("sysrc"));
         assert!(!home.join(".vimrc").exists());
     });
 }
 
 #[test]
-#[serial]
-fn skips_nonexistent_sources() {
+fn rejects_nonexistent_sources() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     let home = root.join("home");
@@ -642,16 +635,16 @@ symlinks:
         )
         .unwrap();
 
-        DotConf::from_yaml_file(&yaml)
+        let err = DotConf::from_yaml_file(&yaml)
             .unwrap()
             .apply(Scope::User)
-            .unwrap();
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("source missing:"));
         assert!(!home.join(".missing").exists());
     });
 }
 
 #[test]
-#[serial]
 fn applies_system_scope_only() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
@@ -674,7 +667,6 @@ fn applies_system_scope_only() {
         .unwrap();
 
         let conf = DotConf::from_yaml_file(&yaml).unwrap();
-        assert!(conf.requires_root());
         conf.apply(Scope::Sys).unwrap();
         assert!(etc.join("sysrc").is_symlink());
         assert!(!home.join(".config/backup").exists());

@@ -2,23 +2,27 @@
 name = "dot-conf"
 version = "0.1.1"
 edition = "2021"
-description = "Automatically configure modular dotfiles"
+rust-version = "1.89"
+description = "Create dotfile symlinks from YAML and back up replaced files"
 license = "GPL-3.0-only"
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.103"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 hostname = "0.4"
 libc = "0.2"
-serde_yml = "0.0.12"
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize", "serialize"] }
 home = "0.5.12"
 symlink = "0.1.0"
 time = { version = "0.3", features = ["formatting"] }
 
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+caseless = "0.2"
+unicode-normalization = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
-serial_test = "3"
 temp-env = "0.3.6"

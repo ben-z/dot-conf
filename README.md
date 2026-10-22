@@ -1,13 +1,7 @@
 # dot-conf
 
-`dot-conf` is a small, elegant Rust CLI for managing dotfiles from a YAML config.
-
-## Why this version
-
-- **Simple mental model:** map `source -> destination` symlinks.
-- **Safe updates:** existing destination files, directories, and symlinks are backed up before replacement.
-- **Flexible mapping:** one source can target many destinations.
-- **Intuitive tooling:** install from prebuilt binaries or `cargo`.
+`dot-conf` creates symlinks from a YAML file and backs up anything it replaces.
+It runs with your shell's permissions, stays quiet on success, and exits nonzero on errors.
 
 ## Install (non-dev)
 
@@ -35,7 +29,7 @@ The Linux archives are statically linked musl builds so they work across common 
 ### Option 3: install with Cargo
 
 ```bash
-cargo install --git https://github.com/ben-z/dot-conf
+cargo install --locked --git https://github.com/ben-z/dot-conf
 ```
 
 ## Quick start
@@ -56,20 +50,32 @@ sys_symlinks:
   .sysrc: /etc/sysrc
 ```
 
-Then run:
+Preview and apply user links:
 
 ```bash
-dot-conf config.yaml
+dot-conf --dry-run --scope user config.yaml
+dot-conf --scope user config.yaml
 ```
+
+Apply both sections with `dot-conf config.yaml` when both destinations are writable.
+For privileged destinations, run the system section separately using your shell's
+privilege tool. Use an absolute backup directory writable by that user:
+
+```bash
+sudo dot-conf --scope system /absolute/path/config.yaml
+```
+
+`~` refers to the invoking user's home directory. Use absolute destination and
+backup paths in system configs so their meaning stays the same under `sudo`.
 
 Options:
 
 - `--version`, `-V` print the installed `dot-conf` version
-- `--dry-run` preview resolved changes and path blockers without modifying files or invoking `sudo`
+- `--dry-run` preview resolved changes and path blockers without modifying files
 - `--scope all|user|system` choose which config section(s) to apply
 - `--user-only` only apply `symlinks` (alias for `--scope user`)
 - `--sys-only` only apply `sys_symlinks` (alias for `--scope system`)
-- `-v`, `-vv` increase log verbosity; `-q`, `-qq` reduce it
+- `-v` report created links on stderr; `-vv` enable debug logs; `-q`, `-qq` reduce logs
 
 ## Host matching
 
@@ -92,15 +98,18 @@ symlinks:
 - Relative destination paths are resolved relative to the current working directory.
 - Destination and backup paths support `~` expansion for the current user's home directory.
 - A symlink entry can use `destinations` plus `host` or `hosts` to apply only on matching hostnames.
-- Missing source files are skipped with a warning.
+- Missing sources, empty paths, empty destination lists, and blank hostnames are errors. Use host filters for machine-specific sources.
+- On macOS and Windows, case and Unicode aliases are rejected conservatively, including on case-sensitive volumes.
+- Windows paths must use long filenames without trailing dots or spaces.
+- A directory cannot be linked inside itself.
 - Re-running an already-correct link leaves it in place without creating a backup.
 - Backup directories are created lazily only when an existing destination is backed up.
 - Backup filenames include the destination name, a readable UTC timestamp, and a destination hash.
-- Config files are all parsed before any changes are applied.
-- Duplicate source keys and duplicate destination mappings are rejected.
-- When applying both user and system links from a non-root shell, system links are applied with `sudo` first; user links are applied only after that succeeds.
-- Dry runs validate obvious destination and backup-directory blockers. System links that need `sudo` may be reported as needing elevated validation instead of hard-failing from a non-root preview.
-- Applying links is not transactional; if a later link in a scope fails, earlier links in that scope may already have been applied or backed up.
+- All selected links in all input configs are checked before any changes are applied.
+- Duplicate source keys, aliased or overlapping destinations, and destinations containing configured sources or backup directories are rejected.
+- System links are applied before user links across all input configs. The caller supplies any elevated privileges.
+- Dry runs use the same filesystem checks as apply and fail on blockers under the current credentials.
+- Applying links is not transactional. Runtime failures or concurrent filesystem changes may leave earlier links applied or backed up. Backing up directories requires the backup directory to be on the same filesystem; regular files can be copied across filesystems.
 
 ## CI and release process
 
@@ -112,9 +121,16 @@ symlinks:
 
 ```bash
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo audit --deny warnings
 ```
+
+The test suite runs the CLI against isolated home directories, checks that failed
+plans leave every file unchanged, and exercises installation with local release
+fixtures. CI runs these checks on Linux, macOS, and Windows; installer tests run
+on Linux and macOS. Install `cargo-audit` with `cargo install cargo-audit --locked`
+to run the dependency check locally.
 
 ## License
 
